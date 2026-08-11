@@ -1,0 +1,5 @@
+.DS_Store
+build-configs/
+kernel/linux/
+kernel/*.deb
+kernel/SHA256SUMS

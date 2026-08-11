@@ -1,0 +1,163 @@
+name: Build Flowcraft BBRv3 kernels
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flowcraft-kernel-build
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      supported: ${{ steps.version.outputs.supported }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Resolve latest stable kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL https://www.kernel.org/finger_banner | awk -F: '/latest stable version/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}')
+          [[ "$version" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]] && version="${version}.0"
+          series="${version%.*}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ -f "kernel/patches/bbrv3-linux-${series}.patch" ]]; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "No pinned BBRv3 patch for linux-${series}.y; skipping ${version}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.supported == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            profile: standard
+            suffix: ""
+            localversion: -flowcraft-bbrv3
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            profile: standard
+            suffix: ""
+            localversion: -flowcraft-bbrv3
+          - arch: x86_64
+            runner: ubuntu-latest
+            profile: max
+            suffix: -max
+            localversion: -flowcraft-bbrv3-max
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            profile: max
+            suffix: -max
+            localversion: -flowcraft-bbrv3-max
+    runs-on: ${{ matrix.runner }}
+    env:
+      KERNEL_VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ matrix.arch }}-${{ needs.plan.outputs.version }}${{ matrix.suffix }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check whether release exists
+        id: release
+        shell: bash
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.release.outputs.needed == 'true'
+
+      - name: Install build dependencies
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git build-essential libncurses-dev libssl-dev libelf-dev bison bc flex rsync debhelper dpkg-dev fakeroot kmod cpio dwarves libdw-dev lz4 zstd xz-utils patch
+
+      - name: Fetch stable source and apply pinned BBRv3 patch
+        if: steps.release.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "v${KERNEL_VERSION}" https://github.com/gregkh/linux.git kernel/linux
+          cd kernel/linux
+          bash "$GITHUB_WORKSPACE/kernel/scripts/apply-bbrv3-port.sh"
+          if [[ "${{ matrix.profile }}" == max ]]; then
+            bash "$GITHUB_WORKSPACE/kernel/scripts/apply-bbrv3-max-profile.sh"
+          fi
+          grep -q '^#define BBR_VERSION[[:space:]]*3' net/ipv4/tcp_bbr.c
+
+      - name: Prepare locked kernel configuration
+        if: steps.release.outputs.needed == 'true'
+        working-directory: kernel/linux
+        run: bash "$GITHUB_WORKSPACE/kernel/scripts/prepare-kernel-config.sh" "${{ matrix.arch }}"
+
+      - name: Build Debian packages
+        if: steps.release.outputs.needed == 'true'
+        working-directory: kernel/linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.arch }}" == arm64 ]]; then
+            make ARCH=arm64 bindeb-pkg -j"$(nproc)" LOCALVERSION="${{ matrix.localversion }}" KDEB_COMPRESS=gzip skipdbg=true
+          else
+            make bindeb-pkg -j"$(nproc)" LOCALVERSION="${{ matrix.localversion }}" KDEB_COMPRESS=gzip skipdbg=true
+          fi
+
+      - name: Verify and checksum release assets
+        if: steps.release.outputs.needed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_arch=amd64
+          [[ "${{ matrix.arch }}" == arm64 ]] && expected_arch=arm64
+          ! find kernel -maxdepth 1 \( -name '*-dbg*.deb' -o -name '*-dbgsym*.deb' \) | grep -q .
+          compgen -G 'kernel/linux-*.deb' >/dev/null
+          compgen -G "kernel/linux-image-*${{ matrix.localversion }}*.deb" >/dev/null
+          while IFS= read -r package; do
+            package_arch=$(dpkg-deb -f "$package" Architecture)
+            [[ "$package_arch" == "$expected_arch" || "$package_arch" == all ]]
+          done < <(find kernel -maxdepth 1 -type f -name 'linux-*.deb' -print)
+
+          config_asset="${{ matrix.arch }}-${KERNEL_VERSION}.config"
+          metadata_asset="${{ matrix.arch }}-${KERNEL_VERSION}-${{ matrix.profile }}.build-metadata"
+          cp "build-configs/$config_asset" "kernel/$config_asset"
+          {
+            printf 'kernel_version=%s\n' "$KERNEL_VERSION"
+            printf 'kernel_source_commit=%s\n' "$(git -C kernel/linux rev-parse HEAD)"
+            printf 'flowcraft_commit=%s\n' "$GITHUB_SHA"
+            printf 'patch_sha256=%s\n' "$(sha256sum "kernel/patches/bbrv3-linux-${KERNEL_VERSION%.*}.patch" | awk '{print $1}')"
+            printf 'architecture=%s\n' "${{ matrix.arch }}"
+            printf 'profile=%s\n' "${{ matrix.profile }}"
+          } > "kernel/$metadata_asset"
+          (cd kernel && sha256sum linux-*.deb "$config_asset" "$metadata_asset" > SHA256SUMS)
+          (cd kernel && sha256sum -c SHA256SUMS)
+
+      - name: Publish release
+        if: steps.release.outputs.needed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          body: |
+            Flowcraft BBRv3 kernel built from gregkh/linux stable ${{ env.KERNEL_VERSION }}.
+            Profile: ${{ matrix.profile }}. Source and patch provenance are recorded in UPSTREAMS.lock.
+          files: |
+            kernel/linux-*.deb
+            kernel/SHA256SUMS
+            kernel/${{ matrix.arch }}-${{ env.KERNEL_VERSION }}.config
+            kernel/${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.profile }}.build-metadata

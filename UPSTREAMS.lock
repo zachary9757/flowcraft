@@ -1,0 +1,5 @@
+# Upstream source snapshots used by Flowcraft 0.1.0
+
+Actions-bbr-v3 https://github.com/byJoey/Actions-bbr-v3 c13d9ef51b7be6b167103952ff08bfff2b844054
+tcp-dashboard https://github.com/666shen/tcp-dashboard 39e0d7fd1e179805cd3fe066f27b1ec899401845
+netshape-manager https://github.com/bear4f/netshape-manager 0489e8d4b70e350dbda27bd3553c3a963fd2425f
