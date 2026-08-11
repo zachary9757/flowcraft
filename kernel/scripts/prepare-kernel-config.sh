@@ -64,7 +64,7 @@ apply_policy_config() {
   scripts/config --module INET_ESP
   scripts/config --module INET6_ESP
   scripts/config --module AF_RXRPC
-  scripts/config --module RXKAD
+  scripts/config --enable RXKAD
 }
 
 require_config_line() {
@@ -106,7 +106,7 @@ validate_config() {
   require_config_line 'CONFIG_INET_ESP=m' 'CONFIG_INET_ESP is not module-enabled.'
   require_config_line 'CONFIG_INET6_ESP=m' 'CONFIG_INET6_ESP is not module-enabled.'
   require_config_line 'CONFIG_AF_RXRPC=m' 'CONFIG_AF_RXRPC is not module-enabled.'
-  require_config_line 'CONFIG_RXKAD=m' 'CONFIG_RXKAD is not module-enabled.'
+  require_config_line 'CONFIG_RXKAD=y' 'CONFIG_RXKAD is not enabled.'
 
   grep -E 'CONFIG_(DEBUG_INFO_NONE|TCP_CONG_BBR|DEFAULT_BBR|DEFAULT_TCP_CONG|NET_SCH_DEFAULT|NET_SCH_FQ|NET_SCH_FQ_CODEL|NET_SCH_PIE|NET_SCH_FQ_PIE|NET_SCH_CAKE|DEFAULT_FQ|DEFAULT_NET_SCH|NETFILTER_XTABLES_LEGACY|IP_NF_IPTABLES_LEGACY|IP_NF_NAT|IP_NF_FILTER|IP_NF_TARGET_MASQUERADE|IP6_NF_IPTABLES_LEGACY|IP6_NF_NAT|IP6_NF_FILTER)=' .config
 }
