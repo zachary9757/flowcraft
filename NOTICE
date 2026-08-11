@@ -1,0 +1,19 @@
+Flowcraft contains adapted work from the following MIT-licensed projects:
+
+- Actions-bbr-v3, copyright its contributors
+  https://github.com/byJoey/Actions-bbr-v3
+  Kernel patches, kernel configuration policy, and build helpers are adapted
+  from commit c13d9ef51b7be6b167103952ff08bfff2b844054.
+
+- tcp-dashboard, copyright its contributors
+  https://github.com/666shen/tcp-dashboard
+  IPv4 address-selection and RPS/RFS concepts are adapted from commit
+  39e0d7fd1e179805cd3fe066f27b1ec899401845. The upstream script itself is not
+  embedded because that snapshot does not pass Bash syntax validation.
+
+- NetShape Manager, copyright its contributors
+  https://github.com/bear4f/netshape-manager
+  Role profiles, BDP buffer sizing, qdisc fallback, diagnostics, and rollback
+  concepts are adapted from commit 0489e8d4b70e350dbda27bd3553c3a963fd2425f.
+
+The full Flowcraft distribution is provided under the repository MIT License.

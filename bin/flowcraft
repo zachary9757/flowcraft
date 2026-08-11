@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+FLOWCRAFT_VERSION="0.1.0"
+
+resolve_lib_dir() {
+  local source_dir
+  source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -d "$source_dir/../lib/flowcraft" ]]; then
+    cd "$source_dir/../lib/flowcraft" && pwd
+  elif [[ -d "${FLOWCRAFT_LIB_DIR:-/usr/local/lib/flowcraft}" ]]; then
+    printf '%s\n' "${FLOWCRAFT_LIB_DIR:-/usr/local/lib/flowcraft}"
+  else
+    printf 'Flowcraft libraries were not found.\n' >&2
+    exit 1
+  fi
+}
+
+FLOWCRAFT_LIB_DIR="$(resolve_lib_dir)"
+export FLOWCRAFT_VERSION FLOWCRAFT_LIB_DIR
+
+# shellcheck source=../lib/flowcraft/core.sh
+source "$FLOWCRAFT_LIB_DIR/core.sh"
+# shellcheck source=../lib/flowcraft/tuning.sh
+source "$FLOWCRAFT_LIB_DIR/tuning.sh"
+# shellcheck source=../lib/flowcraft/kernel.sh
+source "$FLOWCRAFT_LIB_DIR/kernel.sh"
+# shellcheck source=../lib/flowcraft/commands.sh
+source "$FLOWCRAFT_LIB_DIR/commands.sh"
+
+fc_main "$@"
