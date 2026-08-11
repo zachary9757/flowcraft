@@ -19,7 +19,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       supported: ${{ steps.version.outputs.supported }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: version
         name: Resolve latest stable kernel
         shell: bash
@@ -80,7 +80,7 @@ jobs:
             echo "needed=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         if: steps.release.outputs.needed == 'true'
 
       - name: Install build dependencies
