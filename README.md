@@ -27,7 +27,15 @@ Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内�
 
 ## 安装
 
-先克隆仓库并进行只读体检：
+使用 root 用户执行一行命令，安装后会直接进入交互式菜单：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/zachary9757/flowcraft/main/install.sh)
+```
+
+以后直接运行 `flowcraft` 或 `flowcraft menu` 可再次打开菜单，按数字选择首次安装、角色调优、BBRv3 内核、IPv4 优先、RPS/RFS、队列、诊断、回滚或卸载。脚本不会仅因打开菜单而修改网络；首次使用需选择“首次安装 / 角色向导”并确认变更计划。
+
+也可以手动克隆仓库并进行只读体检：
 
 ```bash
 git clone https://github.com/zachary9757/flowcraft.git
