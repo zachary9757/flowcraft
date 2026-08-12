@@ -236,6 +236,7 @@ fc_find_conflicts() {
         printf '%s\n' "$path"
     done < <(find "$root/etc/sysctl.d" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null | sort)
   fi
+  return 0
 }
 
 fc_assert_no_conflicts() {
