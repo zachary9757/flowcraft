@@ -127,12 +127,12 @@ jobs:
           expected_arch=amd64
           [[ "${{ matrix.arch }}" == arm64 ]] && expected_arch=arm64
           ! find kernel -maxdepth 1 \( -name '*-dbg*.deb' -o -name '*-dbgsym*.deb' \) | grep -q .
-          compgen -G 'kernel/linux-*.deb' >/dev/null
           compgen -G "kernel/linux-image-*${{ matrix.localversion }}*.deb" >/dev/null
+          compgen -G "kernel/linux-headers-*${{ matrix.localversion }}*.deb" >/dev/null
           while IFS= read -r package; do
             package_arch=$(dpkg-deb -f "$package" Architecture)
             [[ "$package_arch" == "$expected_arch" || "$package_arch" == all ]]
-          done < <(find kernel -maxdepth 1 -type f -name 'linux-*.deb' -print)
+          done < <(find kernel -maxdepth 1 -type f \( -name "linux-image-*${{ matrix.localversion }}*.deb" -o -name "linux-headers-*${{ matrix.localversion }}*.deb" \) -print)
 
           config_asset="${{ matrix.arch }}-${KERNEL_VERSION}.config"
           metadata_asset="${{ matrix.arch }}-${KERNEL_VERSION}-${{ matrix.profile }}.build-metadata"
@@ -145,7 +145,7 @@ jobs:
             printf 'architecture=%s\n' "${{ matrix.arch }}"
             printf 'profile=%s\n' "${{ matrix.profile }}"
           } > "kernel/$metadata_asset"
-          (cd kernel && sha256sum linux-*.deb "$config_asset" "$metadata_asset" > SHA256SUMS)
+          (cd kernel && sha256sum linux-image-*${{ matrix.localversion }}*.deb linux-headers-*${{ matrix.localversion }}*.deb "$config_asset" "$metadata_asset" > SHA256SUMS)
           (cd kernel && sha256sum -c SHA256SUMS)
 
       - name: Publish release
@@ -157,7 +157,8 @@ jobs:
             Flowcraft BBRv3 kernel built from gregkh/linux stable ${{ env.KERNEL_VERSION }}.
             Profile: ${{ matrix.profile }}. Source and patch provenance are recorded in UPSTREAMS.lock.
           files: |
-            kernel/linux-*.deb
+            kernel/linux-image-*${{ matrix.localversion }}*.deb
+            kernel/linux-headers-*${{ matrix.localversion }}*.deb
             kernel/SHA256SUMS
             kernel/${{ matrix.arch }}-${{ env.KERNEL_VERSION }}.config
             kernel/${{ matrix.arch }}-${{ env.KERNEL_VERSION }}-${{ matrix.profile }}.build-metadata

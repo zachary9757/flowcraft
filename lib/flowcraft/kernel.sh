@@ -58,8 +58,19 @@ fc_kernel_preflight() {
   fi
 }
 
+fc_kernel_package_asset_allowed() {
+  local name="$1"
+  [[ "$name" == "${name##*/}" ]] || return 1
+  case "$name" in
+    linux-image-*.deb | linux-headers-*.deb)
+      [[ "$name" != *-dbg* && "$name" != *-dbgsym* ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fc_kernel_download_release() {
-  local channel="$1" destination="$2" release tag checksum_url url name
+  local channel="$1" destination="$2" release tag checksum_url url name expected actual
   release="$(fc_kernel_latest_release "$channel")"
   [[ -n "$release" ]] || fc_die "Flowcraft Releases 中没有适用于当前架构的 ${channel} 内核。"
   tag="$(jq -r '.tag_name' <<<"$release")"
@@ -69,10 +80,17 @@ fc_kernel_download_release() {
   curl -fL --retry 3 "$checksum_url" -o "$destination/SHA256SUMS"
   while IFS=$'\t' read -r name url; do
     [[ -n "$name" && -n "$url" ]] || continue
+    fc_kernel_package_asset_allowed "$name" || continue
     curl -fL --retry 3 "$url" -o "$destination/$name"
-  done < <(jq -r '.assets[] | select(.name | test("^linux-.*\\.deb$")) | select(.name | test("dbg|dbgsym") | not) | [.name,.browser_download_url] | @tsv' <<<"$release")
-  compgen -G "$destination/linux-*.deb" >/dev/null || fc_die "Release ${tag} 没有可安装的内核包。"
-  (cd "$destination" && sha256sum -c SHA256SUMS >/dev/null)
+  done < <(jq -r '.assets[] | select(.name | endswith(".deb")) | [.name,.browser_download_url] | @tsv' <<<"$release")
+  compgen -G "$destination/linux-image-*.deb" >/dev/null || fc_die "Release ${tag} 没有可安装的内核镜像。"
+  while IFS= read -r -d '' package; do
+    name="${package##*/}"
+    expected="$(awk -v name="$name" '$2 == name || $2 == "*" name {print $1; exit}' "$destination/SHA256SUMS")"
+    [[ "$expected" =~ ^[[:xdigit:]]{64}$ ]] || fc_die "SHA256SUMS 缺少 ${name}。"
+    actual="$(sha256sum "$package" | awk '{print $1}')"
+    [[ "$actual" == "$expected" ]] || fc_die "${name} 校验失败。"
+  done < <(find "$destination" -maxdepth 1 -type f \( -name 'linux-image-*.deb' -o -name 'linux-headers-*.deb' \) -print0)
   printf '%s\n' "$tag"
 }
 
@@ -109,7 +127,7 @@ fc_kernel_install() {
   version="${version#arm64-}"
   version="${version%-max}"
   if [[ "$channel" == max ]]; then expected="${version}-flowcraft-bbrv3-max"; else expected="${version}-flowcraft-bbrv3"; fi
-  while IFS= read -r -d '' deb; do debs+=("$deb"); done < <(find "$temp" -maxdepth 1 -type f -name 'linux-*.deb' -print0)
+  while IFS= read -r -d '' deb; do debs+=("$deb"); done < <(find "$temp" -maxdepth 1 -type f \( -name 'linux-image-*.deb' -o -name 'linux-headers-*.deb' \) -print0)
   for deb in "${debs[@]}"; do dpkg-deb -I "$deb" >/dev/null || fc_die "无效 Debian 包：$deb"; done
   dpkg -i "${debs[@]}" || apt-get install -f -y
   fc_has update-grub && update-grub
