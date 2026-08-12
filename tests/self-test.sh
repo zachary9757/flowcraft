@@ -89,6 +89,10 @@ check_true 'kernel headers package is installable' fc_kernel_package_asset_allow
 check_false 'linux-libc-dev package is rejected' fc_kernel_package_asset_allowed 'linux-libc-dev_7.1.8-1_amd64.deb'
 check_false 'kernel debug package is rejected' fc_kernel_package_asset_allowed 'linux-image-7.1.8-flowcraft-bbrv3-dbg_7.1.8-1_amd64.deb'
 check_false 'package path traversal is rejected' fc_kernel_package_asset_allowed '../linux-image-7.1.8-flowcraft-bbrv3_7.1.8-1_amd64.deb'
+menu_output="$(fc_menu_render)"
+check_true 'menu renders first-install action' grep -q '首次安装 / 角色向导' <<<"$menu_output"
+check_true 'menu renders kernel management' grep -q 'BBRv3 内核管理' <<<"$menu_output"
+check_true 'menu reports unconfigured state' grep -q '配置=未配置' <<<"$menu_output"
 
 mkdir -p "$FLOWCRAFT_ETC_DIR"
 sentinel="$TASK_TMP/should-not-exist"

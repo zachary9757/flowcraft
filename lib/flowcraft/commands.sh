@@ -403,10 +403,224 @@ fc_uninstall() {
   fc_log "Flowcraft 已卸载；Flowcraft 内核包保留，需从旧内核启动后单独 rollback。"
 }
 
+fc_bootstrap() {
+  fc_need_root
+  fc_is_linux || fc_die "Flowcraft 只支持 Linux。"
+  fc_install_program
+  fc_log "Flowcraft 命令已安装：${FC_COMMAND_FILE}"
+  if [[ "${FLOWCRAFT_NO_MENU:-0}" == 1 ]]; then return 0; fi
+  [[ -t 0 && -t 1 ]] || {
+    fc_info "运行 flowcraft menu 进入交互式面板。"
+    return 0
+  }
+  exec "$FC_COMMAND_FILE" menu
+}
+
+fc_menu_badge() {
+  case "${1:-}" in
+    on | auto | active | enabled) printf '%b已启用%b' "$FC_GREEN" "$FC_RESET" ;;
+    complete) printf '%b已完成%b' "$FC_GREEN" "$FC_RESET" ;;
+    off | disabled | inactive) printf '%b未启用%b' "$FC_DIM" "$FC_RESET" ;;
+    missing) printf '%b未配置%b' "$FC_DIM" "$FC_RESET" ;;
+    pending-reboot | applying) printf '%b%s%b' "$FC_YELLOW" "$1" "$FC_RESET" ;;
+    *) printf '%s' "${1:-unknown}" ;;
+  esac
+}
+
+fc_menu_render() {
+  fc_load_config
+  local configured=未配置 stage=missing iface cc qdisc bbr
+  [[ -r "$FC_CONFIG_FILE" ]] && configured=已配置
+  stage="$(fc_read_stage_value STAGE)"
+  [[ -n "$stage" ]] || stage=missing
+  iface="$IFACE"
+  [[ "$iface" == auto ]] && iface="$(fc_detect_iface)"
+  cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
+  qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
+  bbr="$(fc_bbr_version || true)"
+
+  printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
+  printf '              %bFlowcraft VPS 网络调优与 BBRv3 面板%b\n' "$FC_BOLD" "$FC_RESET"
+  printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
+  printf '  1. 首次安装 / 角色向导\n'
+  printf '  2. 切换角色与带宽参数       -> general / relay / landing\n'
+  printf '  3. BBRv3 内核管理           -> 状态 / 标准版 / Max / 回滚\n'
+  printf '  4. IPv4 优先解析            -> [%s]\n' "$(fc_menu_badge "$IPV4_PRIORITY")"
+  printf '  5. RPS/RFS 多队列均衡       -> [%s]\n' "$(fc_menu_badge "$RPS_MODE")"
+  printf '  6. 出口队列管理             -> fq / fq_codel / fq_pie / cake\n'
+  printf '  7. 状态、诊断与安全审计\n'
+  printf '  8. 带宽测试\n'
+  printf '  9. 回滚全部网络配置\n'
+  printf ' 10. 卸载 Flowcraft\n'
+  printf '  0. 退出\n'
+  printf '%b----------------------------------------------------------------%b\n' "$FC_YELLOW" "$FC_RESET"
+  printf ' 当前：配置=%s | 阶段=%s | 角色=%s | 内核=%s\n' "$configured" "$(fc_menu_badge "$stage")" "$ROLE" "$(uname -r 2>/dev/null || printf unknown)"
+  printf '       BBR=%s | 算法=%s | qdisc=%s | 网卡=%s\n' "${bbr:-非 v3}" "$cc" "$qdisc" "${iface:-unknown}"
+  printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
+}
+
+fc_menu_pause() {
+  local ignored
+  read -r -p '按 Enter 返回主菜单...' ignored
+}
+
+fc_menu_require_config() {
+  [[ -r "$FC_CONFIG_FILE" ]] || {
+    fc_warn "尚未完成首次安装，请先选择 1。"
+    return 1
+  }
+}
+
+fc_menu_run() {
+  if ("$@"); then
+    printf '\n'
+  else
+    fc_warn "操作失败，请查看上方错误。"
+  fi
+  fc_menu_pause
+}
+
+fc_menu_role() {
+  fc_menu_require_config || return 1
+  fc_load_config
+  local answer
+  printf '1) general 通用 VPS\n2) relay 中转节点\n3) landing 落地节点\n'
+  read -r -p "角色 [当前 $ROLE]: " answer
+  case "$answer" in
+    1) ROLE=general ;;
+    2) ROLE=relay ;;
+    3) ROLE=landing ;;
+    *) fc_warn "无效角色。"; return 1 ;;
+  esac
+  fc_set_role_defaults
+  if [[ "$ROLE" == relay ]]; then
+    read -r -p "业务 RTT 毫秒 [$RTT_MS]: " answer
+    RTT_MS="${answer:-$RTT_MS}"
+    read -r -p "单连接上限 Mbps [$PER_FLOW_MBPS]: " answer
+    PER_FLOW_MBPS="${answer:-$PER_FLOW_MBPS}"
+    read -r -p "整机总出口 Mbps，0 不限 [$TOTAL_MBPS]: " answer
+    TOTAL_MBPS="${answer:-$TOTAL_MBPS}"
+  elif [[ "$ROLE" == landing ]]; then
+    read -r -p "回源 RTT 毫秒 [$ORIGIN_RTT_MS]: " answer
+    ORIGIN_RTT_MS="${answer:-$ORIGIN_RTT_MS}"
+    read -r -p "整机总出口 Mbps，0 不限 [$TOTAL_MBPS]: " answer
+    TOTAL_MBPS="${answer:-$TOTAL_MBPS}"
+  fi
+  fc_validate_config_value RTT_MS "$RTT_MS" || fc_die "RTT 参数无效。"
+  fc_validate_config_value ORIGIN_RTT_MS "$ORIGIN_RTT_MS" || fc_die "回源 RTT 参数无效。"
+  fc_validate_config_value PER_FLOW_MBPS "$PER_FLOW_MBPS" || fc_die "单连接速率无效。"
+  fc_validate_config_value TOTAL_MBPS "$TOTAL_MBPS" || fc_die "总出口速率无效。"
+  fc_save_config
+  fc_apply_all
+  fc_log "已切换到 ${ROLE} 角色。"
+}
+
+fc_menu_kernel() {
+  local answer confirm
+  printf '1) 查看内核状态\n2) 安装 BBRv3 标准版\n3) 安装 BBRv3 Max 实验版\n4) 回滚 Flowcraft 内核包\n'
+  read -r -p '选择 [1-4]: ' answer
+  case "$answer" in
+    1) fc_kernel_command status ;;
+    2)
+      fc_menu_require_config || return 1
+      read -r -p '安装内核但不自动重启，输入 YES 确认: ' confirm
+      [[ "$confirm" == YES ]] || { fc_warn "已取消。"; return 0; }
+      fc_kernel_command install standard --yes
+      ;;
+    3)
+      fc_menu_require_config || return 1
+      read -r -p 'Max 风险较高，输入 MAX 确认: ' confirm
+      [[ "$confirm" == MAX ]] || { fc_warn "已取消。"; return 0; }
+      fc_kernel_command install max --experimental --yes
+      ;;
+    4)
+      fc_menu_require_config || return 1
+      read -r -p '必须已从旧内核启动，输入 ROLLBACK 确认: ' confirm
+      [[ "$confirm" == ROLLBACK ]] || { fc_warn "已取消。"; return 0; }
+      fc_kernel_command rollback
+      ;;
+    *) fc_warn "无效选项。"; return 1 ;;
+  esac
+}
+
+fc_menu_toggle() {
+  local feature="$1" answer
+  fc_menu_require_config || return 1
+  printf '1) 开启\n2) 关闭\n'
+  read -r -p '选择 [1-2]: ' answer
+  case "$feature:$answer" in
+    ipv4:1) fc_network_command ipv4-priority on ;;
+    ipv4:2) fc_network_command ipv4-priority off ;;
+    rps:1) fc_nic_command rps auto ;;
+    rps:2) fc_nic_command rps off ;;
+    *) fc_warn "无效选项。"; return 1 ;;
+  esac
+}
+
+fc_menu_qdisc() {
+  fc_menu_require_config || return 1
+  local answer mode
+  printf '1) fq\n2) fq_codel\n3) fq_pie\n4) cake\n'
+  read -r -p '选择 [1-4]: ' answer
+  case "$answer" in 1) mode=fq ;; 2) mode=fq_codel ;; 3) mode=fq_pie ;; 4) mode=cake ;; *) fc_warn "无效选项。"; return 1 ;; esac
+  fc_qdisc_command "$mode"
+}
+
+fc_menu_diagnostics() {
+  fc_diagnose
+  printf '\n安全审计：\n'
+  fc_security_audit
+}
+
+fc_menu_rollback() {
+  local confirm
+  fc_menu_require_config || return 1
+  read -r -p '恢复首次安装前的网络快照，输入 ROLLBACK 确认: ' confirm
+  [[ "$confirm" == ROLLBACK ]] || { fc_warn "已取消。"; return 0; }
+  fc_rollback_all
+}
+
+fc_menu_uninstall() {
+  local confirm
+  read -r -p '回滚网络并卸载 Flowcraft，输入 UNINSTALL 确认: ' confirm
+  [[ "$confirm" == UNINSTALL ]] || { fc_warn "已取消。"; return 0; }
+  fc_uninstall
+}
+
+fc_menu() {
+  [[ -t 0 && -t 1 ]] || fc_die "交互式菜单需要终端；自动化请使用 flowcraft install --non-interactive。"
+  fc_need_root
+  local choice
+  while true; do
+    fc_has clear && clear || true
+    fc_menu_render
+    read -r -p '请选择 [0-10]: ' choice
+    case "$choice" in
+      1) fc_menu_run fc_install ;;
+      2) fc_menu_run fc_menu_role ;;
+      3) fc_menu_run fc_menu_kernel ;;
+      4) fc_menu_run fc_menu_toggle ipv4 ;;
+      5) fc_menu_run fc_menu_toggle rps ;;
+      6) fc_menu_run fc_menu_qdisc ;;
+      7) fc_menu_run fc_menu_diagnostics ;;
+      8) fc_menu_run fc_benchmark ;;
+      9) fc_menu_run fc_menu_rollback ;;
+      10)
+        fc_menu_uninstall
+        return 0
+        ;;
+      0) return 0 ;;
+      *) fc_warn "无效选项。"; fc_menu_pause ;;
+    esac
+  done
+}
+
 fc_usage() {
   cat <<'EOF'
 Flowcraft - BBRv3、TCP 调优、监控与出口整形
 
+  flowcraft                          打开交互式菜单
+  flowcraft menu                     打开交互式菜单
   flowcraft inspect [--json]          只读环境体检
   flowcraft plan [install options]    预览安装与调优计划
   flowcraft install [options]         安装；默认进入角色向导
@@ -434,9 +648,15 @@ EOF
 }
 
 fc_main() {
-  local command="${1:-help}"
+  local command="${1:-}"
+  if [[ -z "$command" ]]; then
+    if [[ -t 0 && -t 1 ]]; then fc_menu; else fc_usage; fi
+    return 0
+  fi
   [[ $# -gt 0 ]] && shift || true
   case "$command" in
+    bootstrap) fc_bootstrap ;;
+    menu) fc_menu ;;
     inspect) fc_inspect "$@" ;;
     plan)
       FC_DRY_RUN=1

@@ -49,6 +49,21 @@ cat >"$mock_bin/modprobe" <<'MOCK'
 #!/usr/bin/env bash
 exit 0
 MOCK
+cat >"$mock_bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+output=''
+while (($#)); do
+  case "$1" in
+    -o)
+      output="$2"
+      shift 2
+      ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$output" ]]
+cp "${FLOWCRAFT_TEST_ARCHIVE:?}" "$output"
+MOCK
 chmod +x "$mock_bin"/*
 
 export PATH="$mock_bin:$PATH"
@@ -74,6 +89,14 @@ export FLOWCRAFT_SYSCTL_LOG="$TASK_TMP/sysctl.log"
 : >"$FLOWCRAFT_IP_LOG"
 : >"$FLOWCRAFT_TC_LOG"
 : >"$FLOWCRAFT_SYSCTL_LOG"
+
+export FLOWCRAFT_TEST_ARCHIVE="$TASK_TMP/flowcraft-source.tar.gz"
+tar -czf "$FLOWCRAFT_TEST_ARCHIVE" --exclude=.git -C "$ROOT" .
+FLOWCRAFT_NO_MENU=1 "$ROOT/install.sh" >/dev/null
+test -x "$FLOWCRAFT_INSTALL_FILE"
+test -L "$FLOWCRAFT_COMMAND_FILE"
+test ! -e "$FLOWCRAFT_CONFIG_FILE"
+printf 'PASS: one-line bootstrap installs program without changing network state\n'
 
 # shellcheck source=../lib/flowcraft/core.sh
 source "$ROOT/lib/flowcraft/core.sh"
