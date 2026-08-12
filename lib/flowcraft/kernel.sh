@@ -192,10 +192,47 @@ fc_security_audit() {
   printf 'audit_only=true\n'
 }
 
+fc_benchmark_client() {
+  if fc_has speedtest-cli; then
+    printf 'speedtest-cli\n'
+  elif fc_has speedtest; then
+    printf 'speedtest\n'
+  else
+    return 1
+  fi
+}
+
+fc_install_benchmark_client() {
+  fc_need_root
+  fc_has apt-get || fc_die "当前系统未找到 apt-get，请手动安装 speedtest 或 speedtest-cli。"
+  fc_info "正在从系统软件源安装 speedtest-cli；不会删除或替换已有测速工具。"
+  DEBIAN_FRONTEND=noninteractive apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y speedtest-cli
+}
+
 fc_benchmark() {
-  if ! fc_has speedtest; then
-    fc_die "未找到 speedtest。Flowcraft 不会替换系统软件，请自行安装 Ookla CLI 后重试。"
+  local mode="${1:-}" client answer
+  client="$(fc_benchmark_client || true)"
+  if [[ -z "$client" ]]; then
+    case "$mode" in
+      --install) fc_install_benchmark_client ;;
+      --prompt-install)
+        [[ -t 0 ]] || fc_die "未找到测速客户端。请运行：flowcraft benchmark --install"
+        read -r -p '未找到测速客户端，是否从系统软件源安装 speedtest-cli？[y/N]: ' answer
+        [[ "$answer" =~ ^[Yy]$ ]] || {
+          fc_warn "已取消测速客户端安装。"
+          return 0
+        }
+        fc_install_benchmark_client
+        ;;
+      *) fc_die "未找到测速客户端。运行 flowcraft benchmark --install，或从菜单中确认安装。" ;;
+    esac
+    client="$(fc_benchmark_client || true)"
+    [[ -n "$client" ]] || fc_die "speedtest-cli 安装后仍不可用。"
   fi
   fc_info "测速仅用于带宽参考，不会用测速节点延迟替代业务 RTT。"
-  speedtest --accept-license --accept-gdpr
+  case "$client" in
+    speedtest-cli) speedtest-cli --secure ;;
+    speedtest) speedtest --accept-license --accept-gdpr ;;
+  esac
 }

@@ -631,7 +631,7 @@ fc_menu() {
       5) fc_menu_run fc_menu_toggle rps ;;
       6) fc_menu_run fc_menu_qdisc ;;
       7) fc_menu_run fc_menu_diagnostics ;;
-      8) fc_menu_run fc_benchmark ;;
+      8) fc_menu_run fc_benchmark --prompt-install ;;
       9) fc_menu_run fc_menu_rollback ;;
       10)
         fc_menu_uninstall
@@ -665,7 +665,7 @@ Flowcraft - BBRv3、TCP 调优、监控与出口整形
   flowcraft nic rps auto|off
   flowcraft qdisc fq|fq_codel|fq_pie|cake
   flowcraft security audit            只读内核风险面审计
-  flowcraft benchmark                 使用现有 speedtest 测带宽
+  flowcraft benchmark [--install]     测速；可从系统软件源安装客户端
   flowcraft experimental max-throughput --yes
   flowcraft rollback                  恢复安装前网络状态
   flowcraft uninstall                 回滚并卸载程序
@@ -707,7 +707,7 @@ fc_main() {
     nic) fc_nic_command "$@" ;;
     qdisc) fc_qdisc_command "$@" ;;
     security) [[ "${1:-}" == audit ]] && fc_security_audit || fc_die "支持：security audit" ;;
-    benchmark) fc_benchmark ;;
+    benchmark) fc_benchmark "$@" ;;
     experimental) fc_experimental_command "$@" ;;
     rollback) fc_rollback_all ;;
     uninstall) fc_uninstall ;;
