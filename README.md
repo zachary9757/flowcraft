@@ -33,7 +33,7 @@ Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内�
 bash <(curl -fsSL https://raw.githubusercontent.com/zachary9757/flowcraft/main/install.sh)
 ```
 
-以后直接运行 `flowcraft` 或 `flowcraft menu` 可再次打开菜单，按数字选择首次安装、角色调优、BBRv3 内核、IPv4 优先、RPS/RFS、队列、诊断、回滚或卸载。脚本不会仅因打开菜单而修改网络；首次使用需选择“首次安装 / 角色向导”并确认变更计划。
+以后直接运行 `flowcraft` 或 `flowcraft menu` 可再次打开菜单。首次推荐按“8 带宽测试 → 1 首次安装 → 安装内核时重启 → 7 完成安装并验收”的顺序操作。测速完成后，最近一次下载、上传、Ping 和时间会显示在主面板；Ping 仅供查看，不会被当成业务 RTT。脚本不会仅因打开菜单而修改网络。
 
 也可以手动克隆仓库并进行只读体检：
 
@@ -110,7 +110,7 @@ flowcraft rollback                  恢复安装前网络状态
 flowcraft uninstall                 回滚并移除 Flowcraft
 ```
 
-测速优先使用已有 `speedtest-cli`，其次使用 Ookla `speedtest`。两者都不存在时，菜单会询问是否从 Debian/Ubuntu 系统软件源安装 `speedtest-cli`；也可执行 `flowcraft benchmark --install`。Flowcraft 不会删除或替换已有测速工具，也不会默认黑名单 `esp4`、`esp6`、`rxrpc`。安全审计只报告状态。
+测速优先使用已有 `speedtest-cli`，其次使用 Ookla `speedtest`。两者都不存在时，菜单会询问是否从 Debian/Ubuntu 系统软件源安装 `speedtest-cli`；也可执行 `flowcraft benchmark --install`。最近一次测速结果保存在 `/var/lib/flowcraft/benchmark-result`。Flowcraft 不会删除或替换已有测速工具，也不会默认黑名单 `esp4`、`esp6`、`rxrpc`。安全审计只报告状态。
 
 ## 配置与回滚
 
