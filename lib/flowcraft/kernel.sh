@@ -210,8 +210,76 @@ fc_install_benchmark_client() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y speedtest-cli
 }
 
+fc_benchmark_metric() {
+  local metric="$1"
+  awk -v metric="$metric" '
+    {
+      lower = tolower($0)
+      matched = 0
+      if (metric == "ping" && lower ~ /^[[:space:]]*(ping|latency):/) matched = 1
+      if (metric == "download" && lower ~ /^[[:space:]]*download:/) matched = 1
+      if (metric == "upload" && lower ~ /^[[:space:]]*upload:/) matched = 1
+      if (matched) {
+        value = $0
+        sub(/^[^:]*:[[:space:]]*/, "", value)
+        sub(/[^0-9.].*$/, "", value)
+        if (value ~ /^[0-9]+([.][0-9]+)?$/) {
+          printf "%.2f\n", value
+          exit
+        }
+      }
+    }
+  '
+}
+
+fc_save_benchmark_result() {
+  local client="$1" output="$2" ping download upload temp
+  ping="$(printf '%s\n' "$output" | fc_benchmark_metric ping)"
+  download="$(printf '%s\n' "$output" | fc_benchmark_metric download)"
+  upload="$(printf '%s\n' "$output" | fc_benchmark_metric upload)"
+  if [[ -z "$download" || -z "$upload" ]]; then
+    fc_warn "测速已完成，但无法识别下载/上传结果，面板不会保存本次数据。"
+    return 0
+  fi
+  [[ -n "$ping" ]] || ping=unknown
+  mkdir -p "$FC_STATE_DIR"
+  temp="$(mktemp "${FC_BENCHMARK_FILE}.XXXXXX")"
+  {
+    printf 'TESTED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'CLIENT=%s\n' "$client"
+    printf 'PING_MS=%s\n' "$ping"
+    printf 'DOWNLOAD_MBPS=%s\n' "$download"
+    printf 'UPLOAD_MBPS=%s\n' "$upload"
+  } >"$temp"
+  fc_atomic_replace "$temp" "$FC_BENCHMARK_FILE" 0600
+}
+
+fc_benchmark_summary() {
+  if [[ ! -r "$FC_BENCHMARK_FILE" ]]; then
+    printf '尚未测速（建议先选 8）'
+    return 0
+  fi
+  local key value tested_at='' ping='' download='' upload=''
+  while IFS='=' read -r key value; do
+    case "$key" in
+      TESTED_AT) [[ "$value" =~ ^[0-9TZ:-]+$ ]] && tested_at="$value" ;;
+      PING_MS) [[ "$value" == unknown || "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && ping="$value" ;;
+      DOWNLOAD_MBPS) [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && download="$value" ;;
+      UPLOAD_MBPS) [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && upload="$value" ;;
+    esac
+  done <"$FC_BENCHMARK_FILE"
+  if [[ -z "$download" || -z "$upload" ]]; then
+    printf '测速记录不可用，请重新选择 8'
+    return 0
+  fi
+  printf '下载 %s / 上传 %s Mbps' "$download" "$upload"
+  [[ -n "$ping" && "$ping" != unknown ]] && printf ' | Ping %s ms' "$ping"
+  [[ -n "$tested_at" ]] && printf ' | %s' "$tested_at"
+}
+
 fc_benchmark() {
-  local mode="${1:-}" client answer
+  local mode="${1:-}" client answer output
+  fc_need_root
   client="$(fc_benchmark_client || true)"
   if [[ -z "$client" ]]; then
     case "$mode" in
@@ -232,7 +300,9 @@ fc_benchmark() {
   fi
   fc_info "测速仅用于带宽参考，不会用测速节点延迟替代业务 RTT。"
   case "$client" in
-    speedtest-cli) speedtest-cli --secure ;;
-    speedtest) speedtest --accept-license --accept-gdpr ;;
+    speedtest-cli) output="$(LC_ALL=C speedtest-cli --secure)" ;;
+    speedtest) output="$(LC_ALL=C speedtest --accept-license --accept-gdpr)" ;;
   esac
+  printf '%s\n' "$output"
+  fc_save_benchmark_result "$client" "$output"
 }

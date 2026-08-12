@@ -92,7 +92,15 @@ check_false 'package path traversal is rejected' fc_kernel_package_asset_allowed
 menu_output="$(fc_menu_render)"
 check_true 'menu renders first-install action' grep -q '首次安装 / 角色向导' <<<"$menu_output"
 check_true 'menu renders kernel management' grep -q 'BBRv3 内核管理' <<<"$menu_output"
+check_true 'menu recommends benchmark first' grep -q '8 带宽测试 -> 1 首次安装' <<<"$menu_output"
+check_true 'menu exposes integrated resume and diagnostics' grep -q 'resume / status / diagnose / security' <<<"$menu_output"
+check_true 'menu explains IPv4 enablement condition' grep -q 'IPv6 绕路/握手异常时开启' <<<"$menu_output"
+check_true 'menu explains RPS enablement condition' grep -q '单核 SoftIRQ 瓶颈时开启' <<<"$menu_output"
+check_true 'menu reports missing benchmark' grep -q '尚未测速' <<<"$menu_output"
 check_true 'menu reports unconfigured state' grep -q '配置=未配置' <<<"$menu_output"
+role_guide="$(fc_print_role_guide)"
+check_true 'role guide includes 500M reference' grep -q '500M 家宽.*430.*450' <<<"$role_guide"
+check_true 'role guide includes 1G and 2.5G references' grep -q '2.5G 端口.*2300' <<<"$role_guide"
 
 mkdir -p "$FLOWCRAFT_ETC_DIR"
 sentinel="$TASK_TMP/should-not-exist"
@@ -140,6 +148,7 @@ MOCK
 cat >"$mock_bin/speedtest-cli.fixture" <<'MOCK'
 #!/usr/bin/env bash
 printf 'speedtest-cli %s\n' "$*" >>"${FLOWCRAFT_BENCHMARK_LOG:?}"
+printf 'Ping: 12.34 ms\nDownload: 456.78 Mbit/s\nUpload: 123.45 Mbit/s\n'
 MOCK
 cat >"$mock_bin/apt-get" <<'MOCK'
 #!/usr/bin/env bash
@@ -176,16 +185,23 @@ export FLOWCRAFT_BENCHMARK_TARGET="$mock_bin/speedtest-cli"
 fc_benchmark --install >/dev/null
 check_true 'benchmark installs from system package manager' grep -q '^apt-get install -y speedtest-cli$' "$FLOWCRAFT_BENCHMARK_LOG"
 check_true 'benchmark uses speedtest-cli secure mode' grep -q '^speedtest-cli --secure$' "$FLOWCRAFT_BENCHMARK_LOG"
+check_true 'benchmark persists parsed download' grep -q '^DOWNLOAD_MBPS=456.78$' "$FC_BENCHMARK_FILE"
+check_true 'benchmark persists parsed upload' grep -q '^UPLOAD_MBPS=123.45$' "$FC_BENCHMARK_FILE"
+benchmark_summary="$(fc_benchmark_summary)"
+check_true 'menu benchmark summary includes speed and ping' grep -q '下载 456.78 / 上传 123.45 Mbps | Ping 12.34 ms' <<<"$benchmark_summary"
 rm -f "$FLOWCRAFT_BENCHMARK_TARGET"
 hash -r
 cat >"$mock_bin/speedtest" <<'MOCK'
 #!/usr/bin/env bash
 printf 'speedtest %s\n' "$*" >>"${FLOWCRAFT_BENCHMARK_LOG:?}"
+printf 'Latency: 3.21 ms (jitter: 0.10ms)\nDownload: 987.65 Mbps\nUpload: 432.10 Mbps\n'
 MOCK
 chmod +x "$mock_bin/speedtest"
 : >"$FLOWCRAFT_BENCHMARK_LOG"
 fc_benchmark >/dev/null
 check_true 'benchmark passes license flags to Ookla client' grep -q '^speedtest --accept-license --accept-gdpr$' "$FLOWCRAFT_BENCHMARK_LOG"
+check_true 'Ookla benchmark updates persisted result' grep -q '^DOWNLOAD_MBPS=987.65$' "$FC_BENCHMARK_FILE"
+check_true 'Ookla latency is parsed' grep -q '^PING_MS=3.21$' "$FC_BENCHMARK_FILE"
 rm -f "$mock_bin/speedtest"
 
 FC_DRY_RUN=1

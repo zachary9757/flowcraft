@@ -18,6 +18,7 @@ FC_GAI_BACKUP="$FC_STATE_DIR/gai.conf.before-flowcraft"
 FC_GAI_ABSENT="$FC_STATE_DIR/gai.conf.was-absent"
 FC_RPS_SNAPSHOT="$FC_STATE_DIR/rps.snapshot"
 FC_ROUTE_SNAPSHOT="$FC_STATE_DIR/default-route.snapshot"
+FC_BENCHMARK_FILE="${FLOWCRAFT_BENCHMARK_FILE:-$FC_STATE_DIR/benchmark-result}"
 FC_DRY_RUN="${FLOWCRAFT_DRY_RUN:-0}"
 FC_LOCKED=0
 

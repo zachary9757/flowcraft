@@ -74,10 +74,21 @@ fc_set_role_defaults() {
   esac
 }
 
+fc_print_role_guide() {
+  printf '\n角色与常用参考：\n'
+  printf '  1) general  通用 VPS：BBR + fq，不设置单连接或整机限速\n'
+  printf '  2) relay    跨境中转/观看机：按客户端家宽限制单连接\n'
+  printf '              500M 家宽 -> 430 稳定 / 450 速度优先 Mbps\n'
+  printf '                1G 家宽 -> 850 稳定 / 900 速度优先 Mbps\n'
+  printf '              VPS 1G 端口 -> 整机 900；2.5G 端口 -> 整机 2300；0 不限\n'
+  printf '  3) landing  同区域落地：不限单连接，整机出口可填 900 / 2300 / 0\n'
+  printf '              接收缓冲按源站到落地机的回源 RTT 计算\n'
+}
+
 fc_interactive_wizard() {
   [[ -t 0 ]] || fc_die "无终端时请使用 --non-interactive 和完整参数。"
   local answer
-  printf '\n选择机器角色：\n  1) general 通用 VPS\n  2) relay 跨境中转/观看机\n  3) landing 同区域落地节点\n'
+  fc_print_role_guide
   read -r -p '角色 [1]: ' answer
   case "${answer:-1}" in 1) ROLE=general ;; 2) ROLE=relay ;; 3) ROLE=landing ;; *) fc_die "无效角色。" ;; esac
   fc_set_role_defaults
@@ -107,8 +118,10 @@ fc_interactive_wizard() {
     read -r -p "整机总出口 Mbps，0 不限 [$TOTAL_MBPS]: " answer
     TOTAL_MBPS="${answer:-$TOTAL_MBPS}"
   fi
+  printf '\nIPv4 优先：仅在 IPv6 绕路、握手慢或连接不稳定时建议开启。\n'
   read -r -p '启用 IPv4 优先？[y/N]: ' answer
   [[ "$answer" =~ ^[Yy]$ ]] && IPV4_PRIORITY=on
+  printf 'RPS/RFS：仅在多核高吞吐且单核 SoftIRQ 成为瓶颈时建议开启。\n'
   read -r -p '启用 RPS/RFS？[y/N]: ' answer
   [[ "$answer" =~ ^[Yy]$ ]] && RPS_MODE=auto
 }
@@ -429,7 +442,7 @@ fc_menu_badge() {
 
 fc_menu_render() {
   fc_load_config
-  local configured=未配置 stage=missing iface cc qdisc bbr
+  local configured=未配置 stage=missing iface cc qdisc bbr benchmark
   [[ -r "$FC_CONFIG_FILE" ]] && configured=已配置
   stage="$(fc_read_stage_value STAGE)"
   [[ -n "$stage" ]] || stage=missing
@@ -438,18 +451,21 @@ fc_menu_render() {
   cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   bbr="$(fc_bbr_version || true)"
+  benchmark="$(fc_benchmark_summary)"
 
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
   printf '              %bFlowcraft VPS 网络调优与 BBRv3 面板%b\n' "$FC_BOLD" "$FC_RESET"
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
+  printf '  推荐顺序：8 带宽测试 -> 1 首次安装 ->（安装内核则重启）-> 7 完成并验收\n'
+  printf '%b----------------------------------------------------------------%b\n' "$FC_YELLOW" "$FC_RESET"
   printf '  1. 首次安装 / 角色向导\n'
-  printf '  2. 切换角色与带宽参数       -> general / relay / landing\n'
+  printf '  2. 切换角色与带宽参数       -> 含 500M / 1G / 2.5G 参考档位\n'
   printf '  3. BBRv3 内核管理           -> 状态 / 标准版 / Max / 回滚\n'
-  printf '  4. IPv4 优先解析            -> [%s]\n' "$(fc_menu_badge "$IPV4_PRIORITY")"
-  printf '  5. RPS/RFS 多队列均衡       -> [%s]\n' "$(fc_menu_badge "$RPS_MODE")"
+  printf '  4. IPv4 优先解析            -> [%s] IPv6 绕路/握手异常时开启\n' "$(fc_menu_badge "$IPV4_PRIORITY")"
+  printf '  5. RPS/RFS 多队列均衡       -> [%s] 多核高吞吐/单核 SoftIRQ 瓶颈时开启\n' "$(fc_menu_badge "$RPS_MODE")"
   printf '  6. 出口队列管理             -> fq / fq_codel / fq_pie / cake\n'
-  printf '  7. 状态、诊断与安全审计\n'
-  printf '  8. 带宽测试\n'
+  printf '  7. 完成安装、状态与诊断     -> resume / status / diagnose / security\n'
+  printf '  8. 带宽测试（首次推荐）     -> %s\n' "$benchmark"
   printf '  9. 回滚全部网络配置\n'
   printf ' 10. 卸载 Flowcraft\n'
   printf '  0. 退出\n'
@@ -484,7 +500,7 @@ fc_menu_role() {
   fc_menu_require_config || return 1
   fc_load_config
   local answer
-  printf '1) general 通用 VPS\n2) relay 中转节点\n3) landing 落地节点\n'
+  fc_print_role_guide
   read -r -p "角色 [当前 $ROLE]: " answer
   case "$answer" in
     1) ROLE=general ;;
@@ -561,6 +577,10 @@ fc_menu_kernel() {
 fc_menu_toggle() {
   local feature="$1" answer
   fc_menu_require_config || return 1
+  case "$feature" in
+    ipv4) printf '仅在 IPv6 绕路、握手慢或连接不稳定时建议开启；会完整备份并可恢复 gai.conf。\n' ;;
+    rps) printf '仅在多核高吞吐且单核 SoftIRQ 成为瓶颈时建议开启；普通 1-2 核 VPS 保持关闭。\n' ;;
+  esac
   printf '1) 开启\n2) 关闭\n'
   read -r -p '选择 [1-2]: ' answer
   case "$feature:$answer" in
@@ -588,10 +608,26 @@ fc_menu_qdisc() {
   fc_qdisc_command "$mode"
 }
 
-fc_menu_diagnostics() {
-  fc_diagnose
-  printf '\n安全审计：\n'
-  fc_security_audit
+fc_menu_operations() {
+  local answer stage
+  stage="$(fc_read_stage_value STAGE)"
+  [[ -n "$stage" ]] || stage=missing
+  printf '当前阶段：%s\n' "$(fc_menu_badge "$stage")"
+  printf '1) resume   重启后验证 BBRv3 并完成网络调优\n'
+  printf '2) status   查看内核、BBR、qdisc、速率和重传状态\n'
+  printf '3) diagnose 查看状态、配置冲突和系统能力\n'
+  printf '4) security 只读检查 AEAD / Dirty Frag 风险面\n'
+  read -r -p '选择 [1-4]: ' answer
+  case "$answer" in
+    1) fc_resume ;;
+    2) fc_status ;;
+    3) fc_diagnose ;;
+    4) fc_security_audit ;;
+    *)
+      fc_warn "无效选项。"
+      return 1
+      ;;
+  esac
 }
 
 fc_menu_rollback() {
@@ -630,7 +666,7 @@ fc_menu() {
       4) fc_menu_run fc_menu_toggle ipv4 ;;
       5) fc_menu_run fc_menu_toggle rps ;;
       6) fc_menu_run fc_menu_qdisc ;;
-      7) fc_menu_run fc_menu_diagnostics ;;
+      7) fc_menu_run fc_menu_operations ;;
       8) fc_menu_run fc_benchmark --prompt-install ;;
       9) fc_menu_run fc_menu_rollback ;;
       10)
