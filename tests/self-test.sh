@@ -89,6 +89,31 @@ check_true 'kernel headers package is installable' fc_kernel_package_asset_allow
 check_false 'linux-libc-dev package is rejected' fc_kernel_package_asset_allowed 'linux-libc-dev_7.1.8-1_amd64.deb'
 check_false 'kernel debug package is rejected' fc_kernel_package_asset_allowed 'linux-image-7.1.8-flowcraft-bbrv3-dbg_7.1.8-1_amd64.deb'
 check_false 'package path traversal is rejected' fc_kernel_package_asset_allowed '../linux-image-7.1.8-flowcraft-bbrv3_7.1.8-1_amd64.deb'
+kernel_dependency_log="$TASK_TMP/kernel-dependencies.log"
+: >"$kernel_dependency_log"
+if (
+  dependencies_installed=0
+  fc_has() {
+    case "$1" in
+      apt-get) return 0 ;;
+      curl | jq | sha256sum) ((dependencies_installed == 1)) ;;
+      *) command -v "$1" >/dev/null 2>&1 ;;
+    esac
+  }
+  apt-get() {
+    printf 'apt-get' >>"$kernel_dependency_log"
+    printf ' %s' "$@" >>"$kernel_dependency_log"
+    printf '\n' >>"$kernel_dependency_log"
+    [[ "${1:-}" == install ]] && dependencies_installed=1
+    return 0
+  }
+  fc_kernel_ensure_dependencies >/dev/null
+); then
+  check_true 'kernel dependencies run apt update' grep -q '^apt-get update$' "$kernel_dependency_log"
+  check_true 'kernel dependencies install required packages' grep -q '^apt-get install -y curl jq coreutils ca-certificates$' "$kernel_dependency_log"
+else
+  check_true 'kernel dependency installation succeeds' false
+fi
 menu_output="$(fc_menu_render)"
 check_true 'menu renders first-install action' grep -q '首次安装 / 角色向导' <<<"$menu_output"
 check_true 'menu renders kernel management' grep -q 'BBRv3 内核管理' <<<"$menu_output"

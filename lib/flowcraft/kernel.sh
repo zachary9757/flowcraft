@@ -42,13 +42,37 @@ fc_kernel_latest_release() {
     jq -c --arg regex "$regex" '[.[] | select(.draft == false) | select(.tag_name | test($regex))] | sort_by(.published_at) | last // empty'
 }
 
+fc_kernel_missing_dependencies() {
+  local command
+  for command in curl jq sha256sum; do
+    fc_has "$command" || printf '%s\n' "$command"
+  done
+}
+
+fc_kernel_ensure_dependencies() {
+  local missing display
+  missing="$(fc_kernel_missing_dependencies)"
+  [[ -n "$missing" ]] || return 0
+  display="${missing//$'\n'/、}"
+  fc_has apt-get || fc_die "缺少内核安装依赖：${display}；当前系统没有 apt-get，请手动安装后重试。"
+  fc_info "缺少内核安装依赖：${display}；正在从系统软件源安装。"
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update; then
+    fc_die "软件源更新失败，未能安装内核依赖。请检查网络和 apt 软件源后重试。"
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq coreutils ca-certificates; then
+    fc_die "内核依赖安装失败。请手动安装 curl、jq、coreutils 和 ca-certificates 后重试。"
+  fi
+  missing="$(fc_kernel_missing_dependencies)"
+  [[ -z "$missing" ]] || fc_die "依赖安装后仍缺少：${missing//$'\n'/、}。"
+}
+
 fc_kernel_preflight() {
   fc_need_root
   fc_is_linux || fc_die "内核安装只支持 Linux。"
   fc_kernel_arch >/dev/null || fc_die "当前 CPU 架构不支持 Flowcraft 内核。"
   fc_kernel_supported_system || fc_die "Flowcraft 内核仅支持 Debian 12+ 和 Ubuntu 24.04+。当前系统仍可使用 --kernel skip。"
   fc_has dpkg && fc_has apt-get || fc_die "缺少 dpkg/apt-get。"
-  fc_has curl && fc_has jq && fc_has sha256sum || fc_die "缺少 curl、jq 或 sha256sum。"
+  fc_kernel_ensure_dependencies
   local free_kb
   free_kb="$(df -Pk /boot 2>/dev/null | awk 'NR==2 {print $4}')"
   [[ -n "$free_kb" ]] || free_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
