@@ -137,6 +137,18 @@ cat >"$mock_bin/modprobe" <<'MOCK'
 #!/usr/bin/env bash
 exit 0
 MOCK
+cat >"$mock_bin/speedtest-cli.fixture" <<'MOCK'
+#!/usr/bin/env bash
+printf 'speedtest-cli %s\n' "$*" >>"${FLOWCRAFT_BENCHMARK_LOG:?}"
+MOCK
+cat >"$mock_bin/apt-get" <<'MOCK'
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "$*" >>"${FLOWCRAFT_BENCHMARK_LOG:?}"
+if [[ " $* " == *' install '* ]]; then
+  cp "${FLOWCRAFT_BENCHMARK_FIXTURE:?}" "${FLOWCRAFT_BENCHMARK_TARGET:?}"
+  chmod +x "${FLOWCRAFT_BENCHMARK_TARGET:?}"
+fi
+MOCK
 cat >"$mock_bin/tc" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"${FLOWCRAFT_TC_LOG:?}"
@@ -149,13 +161,32 @@ if [[ "${FLOWCRAFT_TC_MODE:-ok}" == htb-fail && "$*" == *" htb "* ]]; then
 fi
 exit 0
 MOCK
-chmod +x "$mock_bin/sysctl" "$mock_bin/modprobe" "$mock_bin/tc"
+chmod +x "$mock_bin/sysctl" "$mock_bin/modprobe" "$mock_bin/tc" "$mock_bin/apt-get" "$mock_bin/speedtest-cli.fixture"
 PATH="$mock_bin:$PATH"
 export PATH
 export FLOWCRAFT_SYSCTL_LOG="$TASK_TMP/sysctl.log"
 export FLOWCRAFT_TC_LOG="$TASK_TMP/tc.log"
+export FLOWCRAFT_BENCHMARK_LOG="$TASK_TMP/benchmark.log"
+export FLOWCRAFT_BENCHMARK_FIXTURE="$mock_bin/speedtest-cli.fixture"
+export FLOWCRAFT_BENCHMARK_TARGET="$mock_bin/speedtest-cli"
 : >"$FLOWCRAFT_SYSCTL_LOG"
 : >"$FLOWCRAFT_TC_LOG"
+: >"$FLOWCRAFT_BENCHMARK_LOG"
+
+fc_benchmark --install >/dev/null
+check_true 'benchmark installs from system package manager' grep -q '^apt-get install -y speedtest-cli$' "$FLOWCRAFT_BENCHMARK_LOG"
+check_true 'benchmark uses speedtest-cli secure mode' grep -q '^speedtest-cli --secure$' "$FLOWCRAFT_BENCHMARK_LOG"
+rm -f "$FLOWCRAFT_BENCHMARK_TARGET"
+hash -r
+cat >"$mock_bin/speedtest" <<'MOCK'
+#!/usr/bin/env bash
+printf 'speedtest %s\n' "$*" >>"${FLOWCRAFT_BENCHMARK_LOG:?}"
+MOCK
+chmod +x "$mock_bin/speedtest"
+: >"$FLOWCRAFT_BENCHMARK_LOG"
+fc_benchmark >/dev/null
+check_true 'benchmark passes license flags to Ookla client' grep -q '^speedtest --accept-license --accept-gdpr$' "$FLOWCRAFT_BENCHMARK_LOG"
+rm -f "$mock_bin/speedtest"
 
 FC_DRY_RUN=1
 dry_output="$(fc_write_sysctl_profile 2>&1)"

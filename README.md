@@ -104,13 +104,13 @@ flowcraft network ipv4-priority on|off
 flowcraft nic rps auto|off
 flowcraft qdisc fq|fq_codel|fq_pie|cake
 flowcraft security audit            只读检查 AEAD/Dirty Frag 风险面
-flowcraft benchmark                 使用已安装的 speedtest
+flowcraft benchmark [--install]     测速；可从系统软件源安装客户端
 flowcraft experimental max-throughput --yes
 flowcraft rollback                  恢复安装前网络状态
 flowcraft uninstall                 回滚并移除 Flowcraft
 ```
 
-Flowcraft 不会删除或替换系统已有的 speedtest，也不会默认黑名单 `esp4`、`esp6`、`rxrpc`。安全审计只报告状态。
+测速优先使用已有 `speedtest-cli`，其次使用 Ookla `speedtest`。两者都不存在时，菜单会询问是否从 Debian/Ubuntu 系统软件源安装 `speedtest-cli`；也可执行 `flowcraft benchmark --install`。Flowcraft 不会删除或替换已有测速工具，也不会默认黑名单 `esp4`、`esp6`、`rxrpc`。安全审计只报告状态。
 
 ## 配置与回滚
 
