@@ -145,6 +145,8 @@ mkdir -p "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d"
 printf 'net.ipv4.tcp_congestion_control = bbr\n' >"$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d/legacy.conf"
 check_true 'conflicting sysctl owner is detected' grep -q 'legacy.conf' < <(fc_find_conflicts)
 rm -f "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d/legacy.conf"
+empty_conflicts="$(fc_find_conflicts | sort -u)"
+check_eq 'empty conflict scan succeeds under pipefail' '' "$empty_conflicts"
 
 while IFS= read -r key; do
   [[ -n "$key" ]] || continue
