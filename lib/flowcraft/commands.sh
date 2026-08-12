@@ -490,7 +490,10 @@ fc_menu_role() {
     1) ROLE=general ;;
     2) ROLE=relay ;;
     3) ROLE=landing ;;
-    *) fc_warn "无效角色。"; return 1 ;;
+    *)
+      fc_warn "无效角色。"
+      return 1
+      ;;
   esac
   fc_set_role_defaults
   if [[ "$ROLE" == relay ]]; then
@@ -524,22 +527,34 @@ fc_menu_kernel() {
     2)
       fc_menu_require_config || return 1
       read -r -p '安装内核但不自动重启，输入 YES 确认: ' confirm
-      [[ "$confirm" == YES ]] || { fc_warn "已取消。"; return 0; }
+      [[ "$confirm" == YES ]] || {
+        fc_warn "已取消。"
+        return 0
+      }
       fc_kernel_command install standard --yes
       ;;
     3)
       fc_menu_require_config || return 1
       read -r -p 'Max 风险较高，输入 MAX 确认: ' confirm
-      [[ "$confirm" == MAX ]] || { fc_warn "已取消。"; return 0; }
+      [[ "$confirm" == MAX ]] || {
+        fc_warn "已取消。"
+        return 0
+      }
       fc_kernel_command install max --experimental --yes
       ;;
     4)
       fc_menu_require_config || return 1
       read -r -p '必须已从旧内核启动，输入 ROLLBACK 确认: ' confirm
-      [[ "$confirm" == ROLLBACK ]] || { fc_warn "已取消。"; return 0; }
+      [[ "$confirm" == ROLLBACK ]] || {
+        fc_warn "已取消。"
+        return 0
+      }
       fc_kernel_command rollback
       ;;
-    *) fc_warn "无效选项。"; return 1 ;;
+    *)
+      fc_warn "无效选项。"
+      return 1
+      ;;
   esac
 }
 
@@ -553,7 +568,10 @@ fc_menu_toggle() {
     ipv4:2) fc_network_command ipv4-priority off ;;
     rps:1) fc_nic_command rps auto ;;
     rps:2) fc_nic_command rps off ;;
-    *) fc_warn "无效选项。"; return 1 ;;
+    *)
+      fc_warn "无效选项。"
+      return 1
+      ;;
   esac
 }
 
@@ -562,7 +580,11 @@ fc_menu_qdisc() {
   local answer mode
   printf '1) fq\n2) fq_codel\n3) fq_pie\n4) cake\n'
   read -r -p '选择 [1-4]: ' answer
-  case "$answer" in 1) mode=fq ;; 2) mode=fq_codel ;; 3) mode=fq_pie ;; 4) mode=cake ;; *) fc_warn "无效选项。"; return 1 ;; esac
+  case "$answer" in 1) mode=fq ;; 2) mode=fq_codel ;; 3) mode=fq_pie ;; 4) mode=cake ;; *)
+    fc_warn "无效选项。"
+    return 1
+    ;;
+  esac
   fc_qdisc_command "$mode"
 }
 
@@ -576,14 +598,20 @@ fc_menu_rollback() {
   local confirm
   fc_menu_require_config || return 1
   read -r -p '恢复首次安装前的网络快照，输入 ROLLBACK 确认: ' confirm
-  [[ "$confirm" == ROLLBACK ]] || { fc_warn "已取消。"; return 0; }
+  [[ "$confirm" == ROLLBACK ]] || {
+    fc_warn "已取消。"
+    return 0
+  }
   fc_rollback_all
 }
 
 fc_menu_uninstall() {
   local confirm
   read -r -p '回滚网络并卸载 Flowcraft，输入 UNINSTALL 确认: ' confirm
-  [[ "$confirm" == UNINSTALL ]] || { fc_warn "已取消。"; return 0; }
+  [[ "$confirm" == UNINSTALL ]] || {
+    fc_warn "已取消。"
+    return 0
+  }
   fc_uninstall
 }
 
@@ -610,7 +638,10 @@ fc_menu() {
         return 0
         ;;
       0) return 0 ;;
-      *) fc_warn "无效选项。"; fc_menu_pause ;;
+      *)
+        fc_warn "无效选项。"
+        fc_menu_pause
+        ;;
     esac
   done
 }
