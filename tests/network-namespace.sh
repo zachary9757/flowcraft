@@ -43,7 +43,7 @@ TUNING_PROFILE=normal
 EOF
 
 ip netns exec "$namespace" env \
-  FLOWCRAFT_VERSION=0.4.1 \
+  FLOWCRAFT_VERSION=0.5.0 \
   FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1 \
   FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft" \
   FLOWCRAFT_CONFIG_FILE="$TASK_TMP/etc/flowcraft/config.conf" \

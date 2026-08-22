@@ -2,7 +2,7 @@
 
 Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内核、TCP 参数、出口整形、状态诊断和可恢复回滚收敛到一个配置所有者中。它用于替代同时安装多套会互相覆盖 `sysctl` 与 root qdisc 的脚本。
 
-> 当前版本：`0.4.1`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
+> 当前版本：`0.5.0`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
 
 ## 能力
 
@@ -106,9 +106,9 @@ ftcp network ipv4-priority on|off
 ftcp nic rps auto|off
 ftcp qdisc fq|fq_codel|fq_pie|cake
 ftcp security audit            只读检查 AEAD/Dirty Frag 风险面
-ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--apply] [--lift-per-flow]
-ftcp fit --peer HOST --nominal MBPS --discover --ceiling MBPS [--apply]
-                                      有界实测端口 policer 拐点
+ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--cap MBPS]
+         [--from MBPS --to MBPS [--step MBPS]] [--apply] [--lift-per-flow]
+                                      tcpfit sweep 实测 policer 丢包拐点
 ftcp experimental max-throughput --yes
 ftcp rollback                  恢复安装前网络状态
 ftcp uninstall                 回滚并移除 Flowcraft
@@ -124,16 +124,17 @@ ftcp uninstall                 回滚并移除 Flowcraft
 sudo ftcp fit --nominal 500
 sudo ftcp fit --peer 192.0.2.10 --nominal 500
 sudo ftcp fit --peer 192.0.2.10 --port 5201 --nominal 500 --apply
-sudo ftcp fit --peer 192.0.2.10 --nominal 850 --discover --ceiling 6000
+sudo ftcp fit --peer 192.0.2.10 --nominal 850 --cap 6000
+sudo ftcp fit --peer 192.0.2.10 --nominal 850 --from 600 --to 1000 --step 20
 ```
 
-普通模式不再进行不限速基线测试。它先在标称值 20%（最高 200 Mbps）执行路径健康检查，再按 50%、70%、85%、100%、110%、125% 有界递增；任何档位都不得超过本次 ceiling。850 Mbps 标称值默认只会测试到 1062 Mbps。如果范围内全部干净，结果为 `clean-through-envelope`，即使提供 `--apply` 也保留原有配置。
+自动模式使用 tcpfit 0.5.6 的 sweep 状态机。Flowcraft 先在标称值 40% 用 2 流、8 秒验证路径和对端，再临时切换为不限速 `fq` 做 12 秒单流探测。单流送达低于标称值 70% 时额外取两次样本，并采用送达量最高的整组 sender/receiver/retrans 数据，避免公共节点瞬时拥塞把扫描区间拉低。
 
-拐点采用双信号判定：重传率超过动态阈值，或者当前吞吐效率降到低速健康基线的 90% 以下、同时新增测试速率的边际吞吐收益低于 50%。任一信号都必须在同一档位通过 2/3 复测确认，随后才进入 2% 标称带宽步长的细扫。这样既能识别 policer 丢包拐点，也能识别无明显丢包但吞吐曲线已经变平的容量拐点。
+不限速送达量超过 `--cap`（默认 2500 Mbps）时结果为 `above-cap`；不限速丢包不超过 0.1% 时结果为 `no-knee`。两种情况都表示没有证据需要整形，即使提供 `--apply` 也保留现有配置。标称值高于 cap、且单流在 cap 以下同时高丢包时，会补一次 8 流聚合探测，避免把高带宽长 RTT 的单流窗口限制误认成 policer。
 
-只有 `fitted`（已经通过 2/3 复测找到可信拐点）允许自动应用。`dirty-path`、`peer-too-slow`、`measurement-failed`、`shaper-failed` 和 `clean-through-envelope` 都只记录结果。安全余量根据实测干净上限计算，而不是根据输入的标称值计算；结果同时记录 `BREAK_REASON` 和最后一个干净档位的实际吞吐。
+只有不限速高丢包才进入扫描。扫描下界取实际送达量的 95%，上界按丢包率从约 1.25 倍动态放宽、最高不超过 2.5 倍及 cap，区间约取 10 个采样点。丢包跳变阈值为 `max(0.1%, 5×干净本底)` 且相对阈值封顶 1%；同一档位必须 3 次中至少 2 次跳变才确认。第一档即跳变时最多向下测试三次 75% 控制点，以区分真实浅拐点与稳定路径底噪。粗扫确认后再以原步长的 1/4 细扫。
 
-需要继续寻找高于 125% 标称值的真实极限时，必须显式使用 `--discover --ceiling`。公共节点最高允许 2500 Mbps；更高速率必须用 `--peer` 指定近端独享服务器。旧 `--cap N` 暂时兼容为 `--discover --ceiling N`，运行时会显示迁移提示。
+只有 `fitted` 允许自动应用。`above-cap`、`no-knee`、`out-of-range`、`dirty-path`、`peer-too-slow`、`measurement-failed` 和 `shaper-failed` 都只记录结果。安全余量按输入的标称带宽分档，从最后一个干净档位扣除。公共节点 cap 最高为 2500 Mbps；更高速率必须用 `--peer` 指定近端独享服务器。`--discover` 和 `--ceiling` 仅作为 0.4.x 兼容参数保留，前者不再改变测试状态机。
 
 自动模式默认只接受 RTT 不超过 100 ms 的节点；50 ms 以上会明确提示结果可能偏保守。低速健康检查发现路径脏或对端过慢时会自动换节点，最多尝试三个。公共节点由第三方免费提供，存在占线、维护或策略变化；自动发现不会安装软件，也不会修改防火墙。
 
