@@ -67,14 +67,16 @@ MOCK
 chmod +x "$mock_bin"/*
 
 export PATH="$mock_bin:$PATH"
-export FLOWCRAFT_VERSION=0.1.0
+export FLOWCRAFT_VERSION=0.3.0
 export FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
 export FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft"
 export FLOWCRAFT_STATE_DIR="$TASK_TMP/state"
 export FLOWCRAFT_SYSCTL_FILE="$TASK_TMP/etc/sysctl.d/99-flowcraft.conf"
 export FLOWCRAFT_SERVICE_FILE="$TASK_TMP/etc/systemd/flowcraft.service"
-export FLOWCRAFT_INSTALL_FILE="$TASK_TMP/usr/local/sbin/flowcraft"
-export FLOWCRAFT_COMMAND_FILE="$TASK_TMP/usr/local/bin/flowcraft"
+export FLOWCRAFT_INSTALL_FILE="$TASK_TMP/usr/local/sbin/ftcp"
+export FLOWCRAFT_COMMAND_FILE="$TASK_TMP/usr/local/bin/ftcp"
+export FLOWCRAFT_LEGACY_INSTALL_FILE="$TASK_TMP/usr/local/sbin/flowcraft"
+export FLOWCRAFT_LEGACY_COMMAND_FILE="$TASK_TMP/usr/local/bin/flowcraft"
 export FLOWCRAFT_INSTALL_LIB_DIR="$TASK_TMP/usr/local/lib/flowcraft"
 export FLOWCRAFT_CONFIG_FILE="$FLOWCRAFT_ETC_DIR/config.conf"
 export FLOWCRAFT_PROC_ROOT="$TASK_TMP/proc/sys"
@@ -91,10 +93,20 @@ export FLOWCRAFT_SYSCTL_LOG="$TASK_TMP/sysctl.log"
 : >"$FLOWCRAFT_SYSCTL_LOG"
 
 export FLOWCRAFT_TEST_ARCHIVE="$TASK_TMP/flowcraft-source.tar.gz"
+mkdir -p "$(dirname "$FLOWCRAFT_LEGACY_INSTALL_FILE")" "$(dirname "$FLOWCRAFT_LEGACY_COMMAND_FILE")"
+: >"$FLOWCRAFT_LEGACY_INSTALL_FILE"
+ln -s "$FLOWCRAFT_LEGACY_INSTALL_FILE" "$FLOWCRAFT_LEGACY_COMMAND_FILE"
+mkdir -p "$FLOWCRAFT_STATE_DIR"
+: >"$FLOWCRAFT_STATE_DIR/benchmark-result"
 tar -czf "$FLOWCRAFT_TEST_ARCHIVE" --exclude=.git -C "$ROOT" .
 FLOWCRAFT_NO_MENU=1 "$ROOT/install.sh" >/dev/null
 test -x "$FLOWCRAFT_INSTALL_FILE"
 test -L "$FLOWCRAFT_COMMAND_FILE"
+test ! -e "$FLOWCRAFT_LEGACY_INSTALL_FILE"
+test ! -e "$FLOWCRAFT_LEGACY_COMMAND_FILE"
+test ! -e "$FLOWCRAFT_STATE_DIR/benchmark-result"
+test -r "$FLOWCRAFT_INSTALL_LIB_DIR/fit.sh"
+"$FLOWCRAFT_INSTALL_FILE" version | grep -q '^ftcp 0.3.0$'
 test ! -e "$FLOWCRAFT_CONFIG_FILE"
 printf 'PASS: one-line bootstrap installs program without changing network state\n'
 
@@ -109,7 +121,7 @@ while IFS= read -r key; do
   : >"$path"
 done <<<"$FC_TUNED_KEYS"
 
-"$ROOT/bin/flowcraft" install \
+"$ROOT/bin/ftcp" install \
   --non-interactive \
   --role relay \
   --kernel skip \
@@ -126,10 +138,10 @@ grep -q '^STAGE=complete$' "$FLOWCRAFT_STATE_DIR/install-stage"
 grep -q 'net.ipv4.tcp_congestion_control = cubic' "$FLOWCRAFT_SYSCTL_FILE"
 grep -q 'qdisc add dev eth-test.*htb' "$FLOWCRAFT_TC_LOG"
 grep -q 'maxrate 430mbit' "$FLOWCRAFT_TC_LOG"
-grep -q 'ExecStart=.*service-apply' "$FLOWCRAFT_SERVICE_FILE"
+grep -q "^ExecStart=${FLOWCRAFT_INSTALL_FILE} service-apply$" "$FLOWCRAFT_SERVICE_FILE"
 printf 'PASS: isolated full install smoke test\n'
 
-"$ROOT/bin/flowcraft" uninstall >/dev/null
+"$ROOT/bin/ftcp" uninstall >/dev/null
 test ! -e "$FLOWCRAFT_SYSCTL_FILE"
 test ! -e "$FLOWCRAFT_INSTALL_FILE"
 test ! -e "$FLOWCRAFT_COMMAND_FILE"

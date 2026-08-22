@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-FLOWCRAFT_VERSION="0.1.0"
+FLOWCRAFT_VERSION="0.3.0"
 
 resolve_lib_dir() {
   local source_dir
@@ -25,6 +25,8 @@ export FLOWCRAFT_VERSION FLOWCRAFT_LIB_DIR
 source "$FLOWCRAFT_LIB_DIR/core.sh"
 # shellcheck source=../lib/flowcraft/tuning.sh
 source "$FLOWCRAFT_LIB_DIR/tuning.sh"
+# shellcheck source=../lib/flowcraft/fit.sh
+source "$FLOWCRAFT_LIB_DIR/fit.sh"
 # shellcheck source=../lib/flowcraft/kernel.sh
 source "$FLOWCRAFT_LIB_DIR/kernel.sh"
 # shellcheck source=../lib/flowcraft/commands.sh

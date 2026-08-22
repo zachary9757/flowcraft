@@ -7,6 +7,8 @@ net.core.default_qdisc
 net.ipv4.tcp_congestion_control
 net.core.somaxconn
 net.core.netdev_max_backlog
+net.core.netdev_budget
+net.core.netdev_budget_usecs
 net.core.rmem_default
 net.core.wmem_default
 net.core.rmem_max
@@ -50,41 +52,29 @@ fc_sysctl_proc_path() {
 
 fc_tcp_mem_values() {
   local mem="$1"
-  if ((mem < 1024)); then
-    printf '32768 49152 98304\n'
-  elif ((mem < 4096)); then
-    printf '65536 98304 196608\n'
-  else
-    printf '131072 196608 393216\n'
-  fi
+  awk -v m="$mem" 'BEGIN {
+    pages=m*1024/4
+    low=int(pages/16); pressure=int(pages/8); high=int(pages/4)
+    if (low<4096) low=4096
+    if (pressure<8192) pressure=8192
+    if (high<16384) high=16384
+    printf "%d %d %d\n", low, pressure, high
+  }'
 }
 
 fc_buffer_cap() {
-  local mem="$1" cap pages budget
-  if ((mem < 512)); then
-    cap=8388608
-  elif ((mem < 1024)); then
-    cap=16777216
-  elif ((mem < 2048)); then
-    cap=33554432
-  elif ((mem < 4096)); then
-    cap=67108864
-  else
-    cap=134217728
-  fi
-  pages="$(fc_tcp_mem_values "$mem" | awk '{print $3}')"
-  budget=$((pages * 4096 / 8))
-  ((cap > budget)) && cap="$budget"
+  local mem="$1" cap
+  cap=$((mem * 32768))
+  ((cap > 268435456)) && cap=268435456
   printf '%s\n' "$cap"
 }
 
 fc_tcp_max() {
   local rate="$1" rtt="$2" mem="$3" target cap
-  target=$((rate * rtt * 125 * 2))
-  ((target < 8388608)) && target=8388608
-  target=$(((target + 1048575) / 1048576 * 1048576))
+  target=$((rate * rtt * 125 * 2 + 2097152))
   cap="$(fc_buffer_cap "$mem")"
   ((target > cap)) && target="$cap"
+  ((target < 4194304)) && target=4194304
   printf '%s\n' "$target"
 }
 
@@ -103,9 +93,8 @@ fc_htb_burst_kb() {
     ((burst < 64)) && burst=64
     ((burst > 2048)) && burst=2048
   else
-    burst=$(((rate * 125 + 1023) / 1024))
+    burst=$(((rate * 500 + 1023) / 1024))
     ((burst < 32)) && burst=32
-    ((burst > 256)) && burst=256
   fi
   printf '%s\n' "$burst"
 }
@@ -176,14 +165,16 @@ fc_write_sysctl_profile() {
     fc_write_extreme_sysctl_profile
     return 0
   fi
-  local mem recv_rtt reference_rate rmax wmax backlog min_free notsent tcp_mem
+  local mem recv_rtt reference_rate rmax wmax backlog min_free tcp_mem
   local somax syn_backlog port_range tw_buckets file_max conntrack cc temp
   mem="$(fc_mem_mb)"
   ((mem > 0)) || mem=1024
   recv_rtt="$(fc_recv_rtt)"
   reference_rate="$PER_FLOW_MBPS"
   [[ "$ROLE" == landing && "$TOTAL_MBPS" -gt 0 ]] && reference_rate="$TOTAL_MBPS"
-  [[ "$ROLE" == general ]] && reference_rate=1000
+  if [[ "$ROLE" == general ]]; then
+    if ((TOTAL_MBPS > 0)); then reference_rate="$TOTAL_MBPS"; else reference_rate=1000; fi
+  fi
   rmax="$(fc_tcp_max "$reference_rate" "$recv_rtt" "$mem")"
   wmax="$(fc_tcp_max "$reference_rate" "$RTT_MS" "$mem")"
   tcp_mem="$(fc_tcp_mem_values "$mem")"
@@ -194,7 +185,6 @@ fc_write_sysctl_profile() {
     backlog=16384
     min_free=65536
   fi
-  if ((recv_rtt >= 120)); then notsent=16384; else notsent=32768; fi
   case "$ROLE" in
     landing)
       somax=8192
@@ -241,28 +231,29 @@ fc_write_sysctl_profile() {
   fc_append_sysctl "$temp" net.ipv4.tcp_congestion_control "$cc"
   fc_append_sysctl "$temp" net.core.somaxconn "$somax"
   fc_append_sysctl "$temp" net.core.netdev_max_backlog "$backlog"
+  fc_append_sysctl "$temp" net.core.netdev_budget 600
+  fc_append_sysctl "$temp" net.core.netdev_budget_usecs 4000
   fc_append_sysctl "$temp" net.ipv4.tcp_max_syn_backlog "$syn_backlog"
   fc_append_sysctl "$temp" net.ipv4.tcp_syncookies 1
   fc_append_sysctl "$temp" net.ipv4.tcp_window_scaling 1
   fc_append_sysctl "$temp" net.ipv4.tcp_sack 1
   fc_append_sysctl "$temp" net.ipv4.tcp_dsack 1
   fc_append_sysctl "$temp" net.ipv4.tcp_timestamps 1
-  fc_append_sysctl "$temp" net.ipv4.tcp_no_metrics_save 1
+  fc_append_sysctl "$temp" net.ipv4.tcp_no_metrics_save 0
   fc_append_sysctl "$temp" net.ipv4.tcp_moderate_rcvbuf 1
-  fc_append_sysctl "$temp" net.core.rmem_default 262144
-  fc_append_sysctl "$temp" net.core.wmem_default 262144
+  fc_append_sysctl "$temp" net.core.rmem_default 1048576
+  fc_append_sysctl "$temp" net.core.wmem_default 1048576
   fc_append_sysctl "$temp" net.core.rmem_max "$rmax"
   fc_append_sysctl "$temp" net.core.wmem_max "$wmax"
   fc_append_sysctl "$temp" net.core.optmem_max 4194304
-  fc_append_sysctl "$temp" net.ipv4.tcp_rmem "4096 87380 $rmax"
-  fc_append_sysctl "$temp" net.ipv4.tcp_wmem "4096 65536 $wmax"
+  fc_append_sysctl "$temp" net.ipv4.tcp_rmem "4096 1048576 $rmax"
+  fc_append_sysctl "$temp" net.ipv4.tcp_wmem "4096 1048576 $wmax"
   fc_append_sysctl "$temp" net.ipv4.tcp_mem "$tcp_mem"
   fc_append_sysctl "$temp" net.ipv4.tcp_adv_win_scale 1
-  fc_append_sysctl "$temp" net.ipv4.tcp_notsent_lowat "$notsent"
   fc_append_sysctl "$temp" net.ipv4.tcp_mtu_probing 1
   fc_append_sysctl "$temp" net.ipv4.tcp_ecn 0
   fc_append_sysctl "$temp" net.ipv4.tcp_frto 0
-  fc_append_sysctl "$temp" net.ipv4.tcp_fastopen 0
+  fc_append_sysctl "$temp" net.ipv4.tcp_fastopen 3
   fc_append_sysctl "$temp" net.ipv4.tcp_slow_start_after_idle 0
   fc_append_sysctl "$temp" net.ipv4.tcp_tw_reuse 1
   fc_append_sysctl "$temp" net.ipv4.tcp_fin_timeout 15
@@ -370,8 +361,8 @@ fc_add_fq_leaf() {
 fc_try_htb() {
   local iface="$1" total="$2" perflow="$3" burst="$4" mem="$5" error="$6"
   tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
-  tc qdisc add dev "$iface" root handle 1: htb default 10 r2q 1000 2>"$error" || return 1
-  tc class add dev "$iface" parent 1: classid 1:10 htb rate "${total}mbit" ceil "${total}mbit" burst "${burst}kb" cburst "${burst}kb" quantum 15140 2>>"$error" || return 1
+  tc qdisc add dev "$iface" root handle 1: htb default 10 2>"$error" || return 1
+  tc class add dev "$iface" parent 1: classid 1:10 htb rate "${total}mbit" ceil "${total}mbit" burst "${burst}kb" cburst "${burst}kb" quantum 1514 2>>"$error" || return 1
   fc_add_fq_leaf "$iface" 1:10 10: "$perflow" "$mem" "$error"
 }
 
@@ -430,7 +421,17 @@ fc_apply_shape() {
   }
   error="$(mktemp /tmp/flowcraft-tc.XXXXXX)"
   if [[ "$ROLE" == general ]]; then
-    if [[ "$SHAPER_MODE" =~ ^(fq_codel|fq_pie|cake)$ ]]; then
+    if ((TOTAL_MBPS > 0)) && [[ "$SHAPER_MODE" == htb ]]; then
+      burst="$(fc_htb_burst_kb "$TOTAL_MBPS" "$BURST_MODE")"
+      if fc_try_htb "$iface" "$TOTAL_MBPS" "$TOTAL_MBPS" "$burst" "$mem" "$error"; then
+        SHAPER_MODE=htb
+      else
+        detail="$(tail -n 1 "$error")"
+        fc_restore_fq "$iface"
+        rm -f "$error"
+        fc_die "实测总出口整形不可用，已恢复 fq：$detail"
+      fi
+    elif [[ "$SHAPER_MODE" =~ ^(fq_codel|fq_pie|cake)$ ]]; then
       tc qdisc replace dev "$iface" root "$SHAPER_MODE" 2>"$error" || {
         detail="$(tail -n 1 "$error")"
         rm -f "$error"
@@ -466,7 +467,11 @@ fc_apply_shape() {
     fi
   elif ((TOTAL_MBPS > 0)); then
     burst="$(fc_htb_burst_kb "$TOTAL_MBPS" "$BURST_MODE")"
-    fc_try_total "$iface" "$TOTAL_MBPS" "$burst" "$mem" "$error" ||
+    if [[ "$SHAPER_MODE" == htb ]]; then
+      fc_try_htb "$iface" "$TOTAL_MBPS" "$TOTAL_MBPS" "$burst" "$mem" "$error" && SHAPER_MODE=htb
+    else
+      fc_try_total "$iface" "$TOTAL_MBPS" "$burst" "$mem" "$error"
+    fi ||
       {
         detail="$(tail -n 1 "$error")"
         fc_restore_fq "$iface"
@@ -590,7 +595,7 @@ fc_restore_rps() {
 
 fc_apply_all() {
   if [[ -r "$FC_STAGE_FILE" ]] && grep -q '^STAGE=pending-reboot$' "$FC_STAGE_FILE"; then
-    fc_die "内核正在等待重启验证；请先重启并运行 flowcraft resume。"
+    fc_die "内核正在等待重启验证；请先重启并运行 ftcp resume。"
   fi
   fc_write_sysctl_profile
   fc_apply_shape
@@ -640,6 +645,7 @@ fc_status() {
   printf '  default qdisc:     %s\n' "$qdisc"
   printf '  interface/root:    %s / %s\n' "${iface:-unknown}" "${root_qdisc:-unknown}"
   printf '  per-flow / total:  %s / %s Mbps\n' "$PER_FLOW_MBPS" "$TOTAL_MBPS"
+  printf '  port fit:          %s\n' "$(fc_fit_summary)"
   printf '  retrans since boot:%s\n' "$retrans"
   printf '  IPv4 priority/RPS: %s / %s\n' "$IPV4_PRIORITY" "$RPS_MODE"
 }

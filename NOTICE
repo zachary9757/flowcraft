@@ -16,4 +16,10 @@ Flowcraft contains adapted work from the following MIT-licensed projects:
   Role profiles, BDP buffer sizing, qdisc fallback, diagnostics, and rollback
   concepts are adapted from commit 0489e8d4b70e350dbda27bd3553c3a963fd2425f.
 
+- tcpfit, copyright its contributors
+  https://github.com/Kylin010/tcpfit
+  Memory-aware TCP buffer headroom, policer-loss classification, coarse/fine
+  knee measurement, and rate-margin policy are adapted from commit
+  67c0bdfb35dd98e86982600298237b6ecc08ebe4.
+
 The full Flowcraft distribution is provided under the repository MIT License.

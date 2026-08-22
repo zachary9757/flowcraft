@@ -257,18 +257,25 @@ fc_show_plan() {
   printf '  burst:             %s\n' "$BURST_MODE"
   printf '  IPv4 priority/RPS: %s / %s\n' "$IPV4_PRIORITY" "$RPS_MODE"
   printf '  writes:            %s, %s, %s\n' "$FC_CONFIG_FILE" "$FC_SYSCTL_FILE" "$FC_SERVICE_FILE"
-  if [[ "$KERNEL_CHANNEL" != skip ]]; then printf '  stages:            install kernel -> manual reboot -> flowcraft resume\n'; fi
+  if [[ "$KERNEL_CHANNEL" != skip ]]; then printf '  stages:            install kernel -> manual reboot -> ftcp resume\n'; fi
 }
 
 fc_install_program() {
   local source_root
   source_root="$(cd "$FLOWCRAFT_LIB_DIR/../.." && pwd)"
-  if [[ ! "$source_root/bin/flowcraft" -ef "$FC_INSTALL_FILE" ]]; then
+  if [[ ! "$source_root/bin/ftcp" -ef "$FC_INSTALL_FILE" ]]; then
     fc_run install -d -m 0755 "$FC_INSTALL_LIB_DIR" "$(dirname "$FC_INSTALL_FILE")" "$(dirname "$FC_COMMAND_FILE")"
-    fc_run install -m 0755 "$source_root/bin/flowcraft" "$FC_INSTALL_FILE"
+    fc_run install -m 0755 "$source_root/bin/ftcp" "$FC_INSTALL_FILE"
     fc_run install -m 0644 "$source_root"/lib/flowcraft/*.sh "$FC_INSTALL_LIB_DIR/"
   fi
   fc_run ln -sfn "$FC_INSTALL_FILE" "$FC_COMMAND_FILE"
+  if [[ "$FC_LEGACY_INSTALL_FILE" != "$FC_INSTALL_FILE" ]]; then
+    fc_run rm -f "$FC_LEGACY_INSTALL_FILE"
+  fi
+  if [[ "$FC_LEGACY_COMMAND_FILE" != "$FC_COMMAND_FILE" ]]; then
+    fc_run rm -f "$FC_LEGACY_COMMAND_FILE"
+  fi
+  fc_run rm -f "$FC_LEGACY_BENCHMARK_FILE"
 }
 
 fc_write_service() {
@@ -330,7 +337,7 @@ fc_service_apply() {
   local stage
   stage="$(fc_read_stage_value STAGE)"
   if [[ "$stage" != complete ]]; then
-    fc_warn "安装阶段为 ${stage:-missing}，开机服务不会应用网络变更；请运行 flowcraft resume。"
+    fc_warn "安装阶段为 ${stage:-missing}，开机服务不会应用网络变更；请运行 ftcp resume。"
     return 0
   fi
   fc_apply_all
@@ -376,6 +383,7 @@ fc_qdisc_command() {
   fc_load_config
   [[ "$ROLE" == general ]] || fc_die "手动 qdisc 只允许用于 general 角色，避免覆盖限速树。"
   SHAPER_MODE="$mode"
+  TOTAL_MBPS=0
   fc_save_config
   fc_apply_shape
 }
@@ -409,7 +417,7 @@ fc_uninstall() {
   systemctl disable --now flowcraft.service >/dev/null 2>&1 || true
   rm -f "$FC_SERVICE_FILE" "$FC_CONFIG_FILE"
   [[ -L "$FC_COMMAND_FILE" && "$(readlink "$FC_COMMAND_FILE")" == "$FC_INSTALL_FILE" ]] && rm -f "$FC_COMMAND_FILE"
-  rm -f "$FC_INSTALL_FILE"
+  rm -f "$FC_INSTALL_FILE" "$FC_LEGACY_INSTALL_FILE" "$FC_LEGACY_COMMAND_FILE"
   rm -rf "$FC_INSTALL_LIB_DIR"
   systemctl daemon-reload >/dev/null 2>&1 || true
   rm -rf "$FC_STATE_DIR"
@@ -423,7 +431,7 @@ fc_bootstrap() {
   fc_log "Flowcraft 命令已安装：${FC_COMMAND_FILE}"
   if [[ "${FLOWCRAFT_NO_MENU:-0}" == 1 ]]; then return 0; fi
   [[ -t 0 && -t 1 ]] || {
-    fc_info "运行 flowcraft menu 进入交互式面板。"
+    fc_info "运行 ftcp menu 进入交互式面板。"
     return 0
   }
   exec "$FC_COMMAND_FILE" menu
@@ -442,7 +450,7 @@ fc_menu_badge() {
 
 fc_menu_render() {
   fc_load_config
-  local configured=未配置 stage=missing iface cc qdisc bbr benchmark
+  local configured=未配置 stage=missing iface cc qdisc bbr fit
   [[ -r "$FC_CONFIG_FILE" ]] && configured=已配置
   stage="$(fc_read_stage_value STAGE)"
   [[ -n "$stage" ]] || stage=missing
@@ -451,12 +459,12 @@ fc_menu_render() {
   cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   bbr="$(fc_bbr_version || true)"
-  benchmark="$(fc_benchmark_summary)"
+  fit="$(fc_fit_summary)"
 
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
   printf '              %bFlowcraft VPS 网络调优与 BBRv3 面板%b\n' "$FC_BOLD" "$FC_RESET"
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
-  printf '  推荐顺序：8 带宽测试 -> 1 首次安装 ->（安装内核则重启）-> 7 完成并验收\n'
+  printf '  推荐顺序：1 首次安装 ->（安装内核则重启）-> 7 完成 -> 8 端口拟合\n'
   printf '%b----------------------------------------------------------------%b\n' "$FC_YELLOW" "$FC_RESET"
   printf '  1. 首次安装 / 角色向导\n'
   printf '  2. 切换角色与带宽参数       -> 含 500M / 1G / 2.5G 参考档位\n'
@@ -465,7 +473,7 @@ fc_menu_render() {
   printf '  5. RPS/RFS 多队列均衡       -> [%s] 多核高吞吐/单核 SoftIRQ 瓶颈时开启\n' "$(fc_menu_badge "$RPS_MODE")"
   printf '  6. 出口队列管理             -> fq / fq_codel / fq_pie / cake\n'
   printf '  7. 完成安装、状态与诊断     -> resume / status / diagnose / security\n'
-  printf '  8. 带宽测试（首次推荐）     -> %s\n' "$benchmark"
+  printf '  8. 端口拐点实测             -> %s\n' "$fit"
   printf '  9. 回滚全部网络配置\n'
   printf ' 10. 卸载 Flowcraft\n'
   printf '  0. 退出\n'
@@ -630,6 +638,32 @@ fc_menu_operations() {
   esac
 }
 
+fc_menu_fit() {
+  fc_menu_require_config || return 1
+  fc_load_config
+  local peer nominal answer
+  printf '需要一台靠近本机、带宽高于本机端口的 iperf3 服务端。\n'
+  read -r -p '对端 IP / 域名: ' peer
+  [[ -n "$peer" ]] || {
+    fc_warn '必须指定测速对端。'
+    return 1
+  }
+  nominal="$TOTAL_MBPS"
+  ((nominal > 0)) || nominal="$PER_FLOW_MBPS"
+  read -r -p "标称端口带宽 Mbps [$nominal]: " answer
+  nominal="${answer:-$nominal}"
+  read -r -p '测量完成后自动应用推荐值？[y/N]: ' answer
+  local -a args=(--peer "$peer" --nominal "$nominal")
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    args+=(--apply)
+    if [[ "$ROLE" == relay ]]; then
+      read -r -p "同时把单流上限提高到实测推荐值？当前 ${PER_FLOW_MBPS} Mbps [y/N]: " answer
+      [[ "$answer" =~ ^[Yy]$ ]] && args+=(--lift-per-flow)
+    fi
+  fi
+  fc_fit_command "${args[@]}"
+}
+
 fc_menu_rollback() {
   local confirm
   fc_menu_require_config || return 1
@@ -652,7 +686,7 @@ fc_menu_uninstall() {
 }
 
 fc_menu() {
-  [[ -t 0 && -t 1 ]] || fc_die "交互式菜单需要终端；自动化请使用 flowcraft install --non-interactive。"
+  [[ -t 0 && -t 1 ]] || fc_die "交互式菜单需要终端；自动化请使用 ftcp install --non-interactive。"
   fc_need_root
   local choice
   while true; do
@@ -667,7 +701,7 @@ fc_menu() {
       5) fc_menu_run fc_menu_toggle rps ;;
       6) fc_menu_run fc_menu_qdisc ;;
       7) fc_menu_run fc_menu_operations ;;
-      8) fc_menu_run fc_benchmark --prompt-install ;;
+      8) fc_menu_run fc_menu_fit ;;
       9) fc_menu_run fc_menu_rollback ;;
       10)
         fc_menu_uninstall
@@ -686,25 +720,26 @@ fc_usage() {
   cat <<'EOF'
 Flowcraft - BBRv3、TCP 调优、监控与出口整形
 
-  flowcraft                          打开交互式菜单
-  flowcraft menu                     打开交互式菜单
-  flowcraft inspect [--json]          只读环境体检
-  flowcraft plan [install options]    预览安装与调优计划
-  flowcraft install [options]         安装；默认进入角色向导
-  flowcraft resume                    重启后继续安装
-  flowcraft apply                     重应用持久化配置
-  flowcraft status                    查看运行状态
-  flowcraft diagnose                  查看状态和冲突
-  flowcraft profile general|relay|landing
-  flowcraft kernel install|status|rollback
-  flowcraft network ipv4-priority on|off
-  flowcraft nic rps auto|off
-  flowcraft qdisc fq|fq_codel|fq_pie|cake
-  flowcraft security audit            只读内核风险面审计
-  flowcraft benchmark [--install]     测速；可从系统软件源安装客户端
-  flowcraft experimental max-throughput --yes
-  flowcraft rollback                  恢复安装前网络状态
-  flowcraft uninstall                 回滚并卸载程序
+  ftcp                          打开交互式菜单
+  ftcp menu                     打开交互式菜单
+  ftcp inspect [--json]          只读环境体检
+  ftcp plan [install options]    预览安装与调优计划
+  ftcp install [options]         安装；默认进入角色向导
+  ftcp resume                    重启后继续安装
+  ftcp apply                     重应用持久化配置
+  ftcp status                    查看运行状态
+  ftcp diagnose                  查看状态和冲突
+  ftcp profile general|relay|landing
+  ftcp kernel install|status|rollback
+  ftcp network ipv4-priority on|off
+  ftcp nic rps auto|off
+  ftcp qdisc fq|fq_codel|fq_pie|cake
+  ftcp security audit            只读内核风险面审计
+  ftcp fit --peer HOST --nominal MBPS [--apply] [--lift-per-flow]
+                                      实测端口 policer 拐点并可写回 Flowcraft
+  ftcp experimental max-throughput --yes
+  ftcp rollback                  恢复安装前网络状态
+  ftcp uninstall                 回滚并卸载程序
 
 无人值守安装参数：
   --non-interactive --role ROLE --kernel standard|skip|max --iface NAME
@@ -743,12 +778,12 @@ fc_main() {
     nic) fc_nic_command "$@" ;;
     qdisc) fc_qdisc_command "$@" ;;
     security) [[ "${1:-}" == audit ]] && fc_security_audit || fc_die "支持：security audit" ;;
-    benchmark) fc_benchmark "$@" ;;
+    fit) fc_fit_command "$@" ;;
     experimental) fc_experimental_command "$@" ;;
     rollback) fc_rollback_all ;;
     uninstall) fc_uninstall ;;
-    version | --version) printf 'Flowcraft %s\n' "$FLOWCRAFT_VERSION" ;;
+    version | --version) printf 'ftcp %s\n' "$FLOWCRAFT_VERSION" ;;
     help | -h | --help) fc_usage ;;
-    *) fc_die "未知命令：${command}（使用 flowcraft help）" ;;
+    *) fc_die "未知命令：${command}（使用 ftcp help）" ;;
   esac
 }

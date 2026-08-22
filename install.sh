@@ -28,7 +28,7 @@ curl -fsSL --retry 3 \
   "https://github.com/${FLOWCRAFT_REPOSITORY}/archive/refs/heads/main.tar.gz" \
   -o "$archive"
 tar -xzf "$archive" -C "$source_dir" --strip-components=1
-[[ -x "$source_dir/bin/flowcraft" && -r "$source_dir/lib/flowcraft/commands.sh" ]] || die "下载内容不完整。"
+[[ -x "$source_dir/bin/ftcp" && -r "$source_dir/lib/flowcraft/commands.sh" ]] || die "下载内容不完整。"
 
 FLOWCRAFT_REPOSITORY="$FLOWCRAFT_REPOSITORY" \
-  bash "$source_dir/bin/flowcraft" bootstrap
+  bash "$source_dir/bin/ftcp" bootstrap

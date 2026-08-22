@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 
-FC_PROGRAM="flowcraft"
+FC_PROGRAM="ftcp"
 FC_REPOSITORY="${FLOWCRAFT_REPOSITORY:-zachary9757/flowcraft}"
 FC_ETC_DIR="${FLOWCRAFT_ETC_DIR:-/etc/flowcraft}"
 FC_STATE_DIR="${FLOWCRAFT_STATE_DIR:-/var/lib/flowcraft}"
 FC_SYSCTL_FILE="${FLOWCRAFT_SYSCTL_FILE:-/etc/sysctl.d/99-flowcraft.conf}"
 FC_SERVICE_FILE="${FLOWCRAFT_SERVICE_FILE:-/etc/systemd/system/flowcraft.service}"
-FC_INSTALL_FILE="${FLOWCRAFT_INSTALL_FILE:-/usr/local/sbin/flowcraft}"
-FC_COMMAND_FILE="${FLOWCRAFT_COMMAND_FILE:-/usr/local/bin/flowcraft}"
+FC_INSTALL_FILE="${FLOWCRAFT_INSTALL_FILE:-/usr/local/sbin/ftcp}"
+FC_COMMAND_FILE="${FLOWCRAFT_COMMAND_FILE:-/usr/local/bin/ftcp}"
+FC_LEGACY_INSTALL_FILE="${FLOWCRAFT_LEGACY_INSTALL_FILE:-/usr/local/sbin/flowcraft}"
+FC_LEGACY_COMMAND_FILE="${FLOWCRAFT_LEGACY_COMMAND_FILE:-/usr/local/bin/flowcraft}"
+FC_LEGACY_BENCHMARK_FILE="$FC_STATE_DIR/benchmark-result"
 FC_INSTALL_LIB_DIR="${FLOWCRAFT_INSTALL_LIB_DIR:-/usr/local/lib/flowcraft}"
 FC_CONFIG_FILE="${FLOWCRAFT_CONFIG_FILE:-$FC_ETC_DIR/config.conf}"
 FC_LOCK_FILE="$FC_STATE_DIR/lock"
@@ -18,7 +21,7 @@ FC_GAI_BACKUP="$FC_STATE_DIR/gai.conf.before-flowcraft"
 FC_GAI_ABSENT="$FC_STATE_DIR/gai.conf.was-absent"
 FC_RPS_SNAPSHOT="$FC_STATE_DIR/rps.snapshot"
 FC_ROUTE_SNAPSHOT="$FC_STATE_DIR/default-route.snapshot"
-FC_BENCHMARK_FILE="${FLOWCRAFT_BENCHMARK_FILE:-$FC_STATE_DIR/benchmark-result}"
+FC_FIT_RESULT="${FLOWCRAFT_FIT_RESULT:-$FC_STATE_DIR/fit-result}"
 FC_DRY_RUN="${FLOWCRAFT_DRY_RUN:-0}"
 FC_LOCKED=0
 
@@ -103,8 +106,8 @@ fc_validate_config_value() {
     KERNEL_CHANNEL) [[ "$value" =~ ^(standard|skip|max)$ ]] ;;
     IFACE) [[ "$value" == auto || "$value" =~ ^[a-zA-Z0-9_.:-]+$ ]] ;;
     RTT_MS | ORIGIN_RTT_MS) fc_is_uint "$value" && ((value >= 1 && value <= 3000)) ;;
-    PER_FLOW_MBPS) fc_is_uint "$value" && ((value >= 10 && value <= 100000)) ;;
-    TOTAL_MBPS) fc_is_uint "$value" && ((value == 0 || (value >= 10 && value <= 100000))) ;;
+    PER_FLOW_MBPS) fc_is_uint "$value" && ((value >= 1 && value <= 100000)) ;;
+    TOTAL_MBPS) fc_is_uint "$value" && ((value == 0 || (value >= 1 && value <= 100000))) ;;
     BURST_MODE) [[ "$value" =~ ^(policer|throughput)$ ]] ;;
     IPV4_PRIORITY | EXPERIMENTAL) [[ "$value" =~ ^(on|off)$ ]] ;;
     RPS_MODE) [[ "$value" =~ ^(auto|off)$ ]] ;;
@@ -223,10 +226,14 @@ fc_find_conflicts() {
     "$root/etc/sysctl.d/10-bbr.conf"
     "$root/etc/sysctl.d/99-network-performance.conf"
     "$root/etc/sysctl.d/99-zz-netshape-manager.conf"
+    "$root/etc/sysctl.d/99-tcpfit.conf"
     "$root/etc/systemd/system/netshape-manager.service"
     "$root/etc/systemd/system/netshape.service"
     "$root/etc/systemd/system/tc-fq-maxrate.service"
     "$root/etc/systemd/system/netpace.service"
+    "$root/etc/systemd/system/tcpfit-qdisc.service"
+    "$root/usr/local/sbin/tcpfit-qdisc.sh"
+    "$root/etc/networkd-dispatcher/routable.d/50-tcpfit-initcwnd"
   )
   for path in "${candidates[@]}"; do [[ -e "$path" ]] && printf '%s\n' "$path"; done
   if [[ -d "$root/etc/sysctl.d" ]]; then

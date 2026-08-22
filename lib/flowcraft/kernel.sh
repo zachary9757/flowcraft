@@ -158,7 +158,7 @@ fc_kernel_install() {
   fc_write_stage pending-reboot "$expected"
   rm -rf "$temp"
   fc_log "已安装 ${tag}，并保留当前与旧内核。"
-  fc_warn "现在请自行重启；重启成功后运行：sudo flowcraft resume"
+  fc_warn "现在请自行重启；重启成功后运行：sudo ftcp resume"
 }
 
 fc_kernel_verify_pending() {
@@ -214,119 +214,4 @@ fc_security_audit() {
     if lsmod 2>/dev/null | awk '{print $1}' | grep -Fqx "$module"; then printf '%s=loaded\n' "$module"; else printf '%s=not-loaded\n' "$module"; fi
   done
   printf 'audit_only=true\n'
-}
-
-fc_benchmark_client() {
-  if fc_has speedtest-cli; then
-    printf 'speedtest-cli\n'
-  elif fc_has speedtest; then
-    printf 'speedtest\n'
-  else
-    return 1
-  fi
-}
-
-fc_install_benchmark_client() {
-  fc_need_root
-  fc_has apt-get || fc_die "当前系统未找到 apt-get，请手动安装 speedtest 或 speedtest-cli。"
-  fc_info "正在从系统软件源安装 speedtest-cli；不会删除或替换已有测速工具。"
-  DEBIAN_FRONTEND=noninteractive apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y speedtest-cli
-}
-
-fc_benchmark_metric() {
-  local metric="$1"
-  awk -v metric="$metric" '
-    {
-      lower = tolower($0)
-      matched = 0
-      if (metric == "ping" && lower ~ /^[[:space:]]*(ping|latency):/) matched = 1
-      if (metric == "download" && lower ~ /^[[:space:]]*download:/) matched = 1
-      if (metric == "upload" && lower ~ /^[[:space:]]*upload:/) matched = 1
-      if (matched) {
-        value = $0
-        sub(/^[^:]*:[[:space:]]*/, "", value)
-        sub(/[^0-9.].*$/, "", value)
-        if (value ~ /^[0-9]+([.][0-9]+)?$/) {
-          printf "%.2f\n", value
-          exit
-        }
-      }
-    }
-  '
-}
-
-fc_save_benchmark_result() {
-  local client="$1" output="$2" ping download upload temp
-  ping="$(printf '%s\n' "$output" | fc_benchmark_metric ping)"
-  download="$(printf '%s\n' "$output" | fc_benchmark_metric download)"
-  upload="$(printf '%s\n' "$output" | fc_benchmark_metric upload)"
-  if [[ -z "$download" || -z "$upload" ]]; then
-    fc_warn "测速已完成，但无法识别下载/上传结果，面板不会保存本次数据。"
-    return 0
-  fi
-  [[ -n "$ping" ]] || ping=unknown
-  mkdir -p "$FC_STATE_DIR"
-  temp="$(mktemp "${FC_BENCHMARK_FILE}.XXXXXX")"
-  {
-    printf 'TESTED_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    printf 'CLIENT=%s\n' "$client"
-    printf 'PING_MS=%s\n' "$ping"
-    printf 'DOWNLOAD_MBPS=%s\n' "$download"
-    printf 'UPLOAD_MBPS=%s\n' "$upload"
-  } >"$temp"
-  fc_atomic_replace "$temp" "$FC_BENCHMARK_FILE" 0600
-}
-
-fc_benchmark_summary() {
-  if [[ ! -r "$FC_BENCHMARK_FILE" ]]; then
-    printf '尚未测速（建议先选 8）'
-    return 0
-  fi
-  local key value tested_at='' ping='' download='' upload=''
-  while IFS='=' read -r key value; do
-    case "$key" in
-      TESTED_AT) [[ "$value" =~ ^[0-9TZ:-]+$ ]] && tested_at="$value" ;;
-      PING_MS) [[ "$value" == unknown || "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && ping="$value" ;;
-      DOWNLOAD_MBPS) [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && download="$value" ;;
-      UPLOAD_MBPS) [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]] && upload="$value" ;;
-    esac
-  done <"$FC_BENCHMARK_FILE"
-  if [[ -z "$download" || -z "$upload" ]]; then
-    printf '测速记录不可用，请重新选择 8'
-    return 0
-  fi
-  printf '下载 %s / 上传 %s Mbps' "$download" "$upload"
-  [[ -n "$ping" && "$ping" != unknown ]] && printf ' | Ping %s ms' "$ping"
-  [[ -n "$tested_at" ]] && printf ' | %s' "$tested_at"
-}
-
-fc_benchmark() {
-  local mode="${1:-}" client answer output
-  fc_need_root
-  client="$(fc_benchmark_client || true)"
-  if [[ -z "$client" ]]; then
-    case "$mode" in
-      --install) fc_install_benchmark_client ;;
-      --prompt-install)
-        [[ -t 0 ]] || fc_die "未找到测速客户端。请运行：flowcraft benchmark --install"
-        read -r -p '未找到测速客户端，是否从系统软件源安装 speedtest-cli？[y/N]: ' answer
-        [[ "$answer" =~ ^[Yy]$ ]] || {
-          fc_warn "已取消测速客户端安装。"
-          return 0
-        }
-        fc_install_benchmark_client
-        ;;
-      *) fc_die "未找到测速客户端。运行 flowcraft benchmark --install，或从菜单中确认安装。" ;;
-    esac
-    client="$(fc_benchmark_client || true)"
-    [[ -n "$client" ]] || fc_die "speedtest-cli 安装后仍不可用。"
-  fi
-  fc_info "测速仅用于带宽参考，不会用测速节点延迟替代业务 RTT。"
-  case "$client" in
-    speedtest-cli) output="$(LC_ALL=C speedtest-cli --secure)" ;;
-    speedtest) output="$(LC_ALL=C speedtest --accept-license --accept-gdpr)" ;;
-  esac
-  printf '%s\n' "$output"
-  fc_save_benchmark_result "$client" "$output"
 }
