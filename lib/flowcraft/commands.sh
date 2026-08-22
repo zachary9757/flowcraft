@@ -54,11 +54,14 @@ fc_set_role_defaults() {
   TUNING_PROFILE=normal
   case "$ROLE" in
     general)
+      RTT_MS=160
+      PER_FLOW_MBPS=1000
       TOTAL_MBPS=0
       BURST_MODE=throughput
       SHAPER_MODE=fq
       ;;
     relay)
+      RTT_MS=160
       PER_FLOW_MBPS=430
       TOTAL_MBPS=0
       BURST_MODE=policer
@@ -72,6 +75,19 @@ fc_set_role_defaults() {
       SHAPER_MODE=auto
       ;;
   esac
+}
+
+fc_set_role_total() {
+  local total="$1" source="${2:-manual}"
+  TOTAL_MBPS="$total"
+  ((TOTAL_MBPS > 0)) || return 0
+  if [[ "$source" == fitted ]]; then
+    BURST_MODE=policer
+    SHAPER_MODE=htb
+  elif [[ "$ROLE" == general ]]; then
+    SHAPER_MODE=htb
+  fi
+  [[ "$ROLE" != general ]] || PER_FLOW_MBPS="$TOTAL_MBPS"
 }
 
 fc_print_role_guide() {
@@ -344,12 +360,19 @@ fc_service_apply() {
 }
 
 fc_profile() {
-  local role="${1:-}"
+  local role="${1:-}" preserved_total fitted total_source=manual
   fc_validate_config_value ROLE "$role" || fc_die "角色必须是 general、relay 或 landing。"
   fc_need_root
   fc_load_config
+  preserved_total="$TOTAL_MBPS"
+  fitted="$(fc_fit_recommendation || true)"
+  if [[ -n "$fitted" ]]; then
+    preserved_total="$fitted"
+    total_source=fitted
+  fi
   ROLE="$role"
   fc_set_role_defaults
+  fc_set_role_total "$preserved_total" "$total_source"
   fc_save_config
   fc_apply_all
 }
@@ -448,10 +471,33 @@ fc_menu_badge() {
   esac
 }
 
+fc_menu_next_action() {
+  local configured="$1" stage="$2" fit_status="${3:-}"
+  if [[ "$configured" != 1 ]]; then
+    printf '[1] 首次安装：选择角色、内核和业务参数'
+  elif [[ "$stage" =~ ^(pending-reboot|applying)$ ]]; then
+    printf '重启系统后进入 [7] 执行 resume 并验证 BBRv3'
+  elif [[ "$stage" != complete ]]; then
+    printf '[1] 重新完成安装阶段'
+  else
+    case "$fit_status" in
+      '') printf '[8] 拟合物理总出口拐点' ;;
+      dirty-path | peer-too-slow | measurement-failed | shaper-failed)
+        printf '[8] 更换或指定对端后重试，再用 [7] 复核'
+        ;;
+      fitted) printf '[7] 用 status / diagnose 复核实测配置' ;;
+      *) printf '[7] 复核当前配置；线路或套餐变化时才重跑 [8]' ;;
+    esac
+  fi
+}
+
 fc_menu_render() {
   fc_load_config
-  local configured=未配置 stage=missing iface cc qdisc bbr fit
-  [[ -r "$FC_CONFIG_FILE" ]] && configured=已配置
+  local configured=未配置 configured_state=0 stage=missing iface cc qdisc bbr fit fit_status next_action
+  if [[ -r "$FC_CONFIG_FILE" ]]; then
+    configured=已配置
+    configured_state=1
+  fi
   stage="$(fc_read_stage_value STAGE)"
   [[ -n "$stage" ]] || stage=missing
   iface="$IFACE"
@@ -460,20 +506,26 @@ fc_menu_render() {
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   bbr="$(fc_bbr_version || true)"
   fit="$(fc_fit_summary)"
+  fit_status="$(fc_fit_result_value STATUS || true)"
+  next_action="$(fc_menu_next_action "$configured_state" "$stage" "$fit_status")"
 
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
   printf '              %bFlowcraft VPS 网络调优与 BBRv3 面板%b\n' "$FC_BOLD" "$FC_RESET"
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
-  printf '  推荐顺序：1 首次安装 ->（安装内核则重启）-> 7 完成 -> 8 端口拟合\n'
+  printf '  调优流程：\n'
+  printf '    [1] 角色/内核/基础调优 -> [重启] -> [7] resume 验证\n'
+  printf '    [8] 物理总出口拟合      -> [7] status / diagnose 复核\n'
+  printf '    角色管业务策略；relay 单流不等于 VPS 物理总出口。\n'
+  printf '  下一步：%s\n' "$next_action"
   printf '%b----------------------------------------------------------------%b\n' "$FC_YELLOW" "$FC_RESET"
-  printf '  1. 首次安装 / 角色向导\n'
-  printf '  2. 切换角色与带宽参数       -> 含 500M / 1G / 2.5G 参考档位\n'
+  printf '  1. 首次安装：角色 / 内核 / 基础调优\n'
+  printf '  2. 角色与业务策略         -> RTT / 单流 / 复用拟合总出口\n'
   printf '  3. BBRv3 内核管理           -> 状态 / 标准版 / Max / 回滚\n'
   printf '  4. IPv4 优先解析            -> [%s] IPv6 绕路/握手异常时开启\n' "$(fc_menu_badge "$IPV4_PRIORITY")"
   printf '  5. RPS/RFS 多队列均衡       -> [%s] 多核高吞吐/单核 SoftIRQ 瓶颈时开启\n' "$(fc_menu_badge "$RPS_MODE")"
   printf '  6. 出口队列管理             -> fq / fq_codel / fq_pie / cake\n'
-  printf '  7. 完成安装、状态与诊断     -> resume / status / diagnose / security\n'
-  printf '  8. 端口拐点实测             -> %s\n' "$fit"
+  printf '  7. 安装续作与状态复核       -> resume / status / diagnose / security\n'
+  printf '  8. 物理总出口拐点实测     -> %s\n' "$fit"
   printf '  9. 回滚全部网络配置\n'
   printf ' 10. 卸载 Flowcraft\n'
   printf '  0. 退出\n'
@@ -507,7 +559,9 @@ fc_menu_run() {
 fc_menu_role() {
   fc_menu_require_config || return 1
   fc_load_config
-  local answer
+  local answer previous_total fitted total_default total_source=manual
+  previous_total="$TOTAL_MBPS"
+  fitted="$(fc_fit_recommendation || true)"
   fc_print_role_guide
   read -r -p "角色 [当前 $ROLE]: " answer
   case "$answer" in
@@ -523,20 +577,33 @@ fc_menu_role() {
   if [[ "$ROLE" == relay ]]; then
     read -r -p "业务 RTT 毫秒 [$RTT_MS]: " answer
     RTT_MS="${answer:-$RTT_MS}"
+    printf '单连接上限是客户端/业务策略，不等同于 VPS 物理总出口。\n'
     read -r -p "单连接上限 Mbps [$PER_FLOW_MBPS]: " answer
     PER_FLOW_MBPS="${answer:-$PER_FLOW_MBPS}"
-    read -r -p "整机总出口 Mbps，0 不限 [$TOTAL_MBPS]: " answer
-    TOTAL_MBPS="${answer:-$TOTAL_MBPS}"
   elif [[ "$ROLE" == landing ]]; then
     read -r -p "回源 RTT 毫秒 [$ORIGIN_RTT_MS]: " answer
     ORIGIN_RTT_MS="${answer:-$ORIGIN_RTT_MS}"
-    read -r -p "整机总出口 Mbps，0 不限 [$TOTAL_MBPS]: " answer
-    TOTAL_MBPS="${answer:-$TOTAL_MBPS}"
   fi
+  total_default="$previous_total"
+  if [[ -n "$fitted" ]]; then
+    total_default="$fitted"
+    total_source=fitted
+    printf '检测到最近可信拟合建议：总出口 %s Mbps。\n' "$fitted"
+  fi
+  read -r -p "整机总出口 Mbps；输入 r 先不限速并稍后重测 [$total_default]: " answer
+  if [[ "$answer" =~ ^[Rr]$ ]]; then
+    total_default=0
+    total_source=manual
+    fc_info '本次先不设置总出口；角色应用完成后请运行菜单 8 重新拟合。'
+  else
+    [[ -z "$answer" ]] || total_source=manual
+    total_default="${answer:-$total_default}"
+  fi
+  fc_validate_config_value TOTAL_MBPS "$total_default" || fc_die "总出口速率无效。"
+  fc_set_role_total "$total_default" "$total_source"
   fc_validate_config_value RTT_MS "$RTT_MS" || fc_die "RTT 参数无效。"
   fc_validate_config_value ORIGIN_RTT_MS "$ORIGIN_RTT_MS" || fc_die "回源 RTT 参数无效。"
   fc_validate_config_value PER_FLOW_MBPS "$PER_FLOW_MBPS" || fc_die "单连接速率无效。"
-  fc_validate_config_value TOTAL_MBPS "$TOTAL_MBPS" || fc_die "总出口速率无效。"
   fc_save_config
   fc_apply_all
   fc_log "已切换到 ${ROLE} 角色。"
@@ -641,27 +708,49 @@ fc_menu_operations() {
 fc_menu_fit() {
   fc_menu_require_config || return 1
   fc_load_config
-  local peer nominal answer
+  local peer nominal cap answer
   printf '可指定靠近本机、带宽高于本机端口的 iperf3 服务端。\n'
   printf '直接回车会从公共节点中按 RTT 和实际可用端口自动选择。\n'
+  printf '当前 Flowcraft 整形：单流 %s Mbps / 总出口 %s Mbps。\n' "$PER_FLOW_MBPS" "$TOTAL_MBPS"
   read -r -p '对端 IP / 域名 [自动]: ' peer
   nominal="$TOTAL_MBPS"
   ((nominal > 0)) || nominal="$PER_FLOW_MBPS"
-  read -r -p "标称端口带宽 Mbps [$nominal]: " answer
+  read -r -p "拟合参考带宽 Mbps（用于健康检查与安全余量）[$nominal]: " answer
   nominal="${answer:-$nominal}"
   fc_is_uint "$nominal" || {
-    fc_warn '标称端口带宽必须是整数 Mbps。'
+    fc_warn '拟合参考带宽必须是整数 Mbps。'
     return 1
   }
   local -a args=(--nominal "$nominal")
-  [[ -z "$peer" ]] || args+=(--peer "$peer")
+  if [[ -n "$peer" ]]; then
+    args+=(--peer "$peer")
+    cap=$((nominal * 2))
+    ((cap >= 2500)) || cap=2500
+    read -r -p "最高扫描速率 Mbps [$cap]: " answer
+    cap="${answer:-$cap}"
+    fc_is_uint "$cap" && ((cap >= nominal)) || {
+      fc_warn '最高扫描速率必须是不小于拟合参考带宽的整数 Mbps。'
+      return 1
+    }
+    if ((cap > 2500)); then
+      printf '高带宽扫描会产生大量流量，仅应对自有或独享 iperf3 对端使用。\n'
+      read -r -p "确认最高测试 ${cap} Mbps？[y/N]: " answer
+      [[ "$answer" =~ ^[Yy]$ ]] || {
+        fc_warn '已取消高带宽扫描。'
+        return 0
+      }
+    fi
+    args+=(--cap "$cap")
+  else
+    printf '自动公共模式固定最高 2500 Mbps；若链路更快，只确认能力超出范围并保留现有配置。\n'
+  fi
   printf '将按 tcpfit sweep 逻辑先做不限速 fq 单流探测；仅在高丢包时动态扫描。\n'
-  printf '公共节点扫描上限为 2500 Mbps；超过上限或未找到 2/3 丢包拐点都不会应用。\n'
+  printf '只有找到 2/3 可复现丢包拐点才会应用。\n'
   read -r -p '找到可信丢包拐点后自动应用推荐值？[y/N]: ' answer
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     args+=(--apply)
     if [[ "$ROLE" == relay ]]; then
-      read -r -p "同时把单流上限提高到实测推荐值？当前 ${PER_FLOW_MBPS} Mbps [y/N]: " answer
+      read -r -p "同时把单流上限同步为实测推荐值？当前 ${PER_FLOW_MBPS} Mbps [y/N]: " answer
       [[ "$answer" =~ ^[Yy]$ ]] && args+=(--lift-per-flow)
     fi
   fi

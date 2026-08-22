@@ -73,6 +73,27 @@ check_eq '2G RAM tcp_mem budget' '32768 65536 131072' "$(fc_tcp_mem_values 2048)
 check_eq '8G RAM tcp_mem budget' '131072 262144 524288' "$(fc_tcp_mem_values 8192)"
 check_eq 'relay receive RTT' 160 "$(ROLE=relay RTT_MS=160 ORIGIN_RTT_MS=250 fc_recv_rtt)"
 check_eq 'landing receive RTT' 250 "$(ROLE=landing RTT_MS=5 ORIGIN_RTT_MS=250 fc_recv_rtt)"
+ROLE=landing
+RTT_MS=5
+fc_set_role_defaults
+ROLE=relay
+fc_set_role_defaults
+check_eq 'relay defaults do not inherit landing RTT' 160 "$RTT_MS"
+ROLE=landing
+RTT_MS=5
+fc_set_role_defaults
+ROLE=general
+fc_set_role_defaults
+check_eq 'general defaults do not inherit landing RTT' 160 "$RTT_MS"
+ROLE=landing
+fc_set_role_defaults
+fc_set_role_total 900 manual
+check_eq 'manual landing total keeps throughput burst policy' throughput "$BURST_MODE"
+check_eq 'manual landing total keeps role qdisc selection' auto "$SHAPER_MODE"
+fc_set_role_defaults
+fc_set_role_total 900 fitted
+check_eq 'fitted landing total selects policer burst policy' policer "$BURST_MODE"
+check_eq 'fitted landing total selects deterministic HTB' htb "$SHAPER_MODE"
 check_eq 'policer burst' 210 "$(fc_htb_burst_kb 430 policer)"
 check_eq 'throughput burst' 525 "$(fc_htb_burst_kb 430 throughput)"
 check_eq 'fit margin at 30M' 1 "$(fc_fit_margin 30)"
@@ -198,15 +219,29 @@ else
   check_true 'kernel dependency installation succeeds' false
 fi
 menu_output="$(fc_menu_render)"
-check_true 'menu renders first-install action' grep -q '首次安装 / 角色向导' <<<"$menu_output"
+check_true 'menu renders first-install action' grep -q '首次安装：角色 / 内核 / 基础调优' <<<"$menu_output"
 check_true 'menu renders kernel management' grep -q 'BBRv3 内核管理' <<<"$menu_output"
-check_true 'menu exposes port fit workflow' grep -q '端口拐点实测' <<<"$menu_output"
+check_true 'menu exposes physical-egress fit workflow' grep -q '物理总出口拐点实测' <<<"$menu_output"
+check_true 'menu renders the full tuning sequence' grep -q '调优流程' <<<"$menu_output"
+check_true 'menu separates relay policy from physical egress' grep -q 'relay 单流不等于 VPS 物理总出口' <<<"$menu_output"
+check_true 'unconfigured menu directs the user to first install' grep -q '下一步：\[1\] 首次安装' <<<"$menu_output"
 check_false 'menu omits generic bandwidth benchmark' grep -q '带宽测试' <<<"$menu_output"
 check_false 'menu no longer exposes the old advanced discovery branch' grep -q '高级发现' <<<"$menu_output"
-check_true 'menu exposes integrated resume and diagnostics' grep -q 'resume / status / diagnose / security' <<<"$menu_output"
+check_true 'menu exposes integrated resume and diagnostics' grep -q '安装续作与状态复核.*resume / status / diagnose / security' <<<"$menu_output"
 check_true 'menu explains IPv4 enablement condition' grep -q 'IPv6 绕路/握手异常时开启' <<<"$menu_output"
 check_true 'menu explains RPS enablement condition' grep -q '单核 SoftIRQ 瓶颈时开启' <<<"$menu_output"
 check_true 'menu reports unconfigured state' grep -q '配置=未配置' <<<"$menu_output"
+check_eq 'pending reboot flow directs the user to resume' \
+  '重启系统后进入 [7] 执行 resume 并验证 BBRv3' "$(fc_menu_next_action 1 pending-reboot '')"
+check_eq 'completed flow without fit directs the user to measurement' \
+  '[8] 拟合物理总出口拐点' "$(fc_menu_next_action 1 complete '')"
+check_eq 'completed fitted flow directs the user to verification' \
+  '[7] 用 status / diagnose 复核实测配置' "$(fc_menu_next_action 1 complete fitted)"
+check_eq 'failed peer flow directs the user to retry measurement' \
+  '[8] 更换或指定对端后重试，再用 [7] 复核' "$(fc_menu_next_action 1 complete peer-too-slow)"
+check_true 'fit menu distinguishes shaping from physical capacity' grep -q '当前 Flowcraft 整形' "$ROOT/lib/flowcraft/commands.sh"
+check_true 'fit menu exposes a private-peer scan ceiling' grep -q '最高扫描速率 Mbps' "$ROOT/lib/flowcraft/commands.sh"
+check_true 'fit menu describes per-flow assignment as synchronization' grep -q '单流上限同步为实测推荐值' "$ROOT/lib/flowcraft/commands.sh"
 usage_output="$(fc_usage)"
 check_true 'usage exposes the ftcp command' grep -q '^  ftcp fit ' <<<"$usage_output"
 check_false 'usage removes benchmark command' grep -q 'benchmark' <<<"$usage_output"
@@ -229,6 +264,78 @@ check_eq 'valid config loaded' relay "$ROLE"
 check_eq 'numeric config loaded' 220 "$RTT_MS"
 check_eq 'invalid interface rejected' auto "$IFACE"
 check_true 'config is never executed' test ! -e "$sentinel"
+private_menu_args="$TASK_TMP/private-menu-args"
+(
+  fc_menu_require_config() { return 0; }
+  fc_fit_command() {
+    printf '%s ' "$@" >"$private_menu_args"
+    printf '\n' >>"$private_menu_args"
+  }
+  fc_menu_fit <<'EOF' >/dev/null
+peer.test
+850
+6000
+y
+n
+EOF
+)
+check_true 'private-peer menu forwards the confirmed high scan ceiling' \
+  grep -q '^--nominal 850 --peer peer.test --cap 6000 ' "$private_menu_args"
+public_menu_args="$TASK_TMP/public-menu-args"
+(
+  fc_menu_require_config() { return 0; }
+  fc_fit_command() { printf '%s\n' "$@" >"$public_menu_args"; }
+  fc_menu_fit <<'EOF' >/dev/null
+
+
+n
+EOF
+)
+check_false 'public menu never forwards a user-controlled scan ceiling' grep -q -- '--cap' "$public_menu_args"
+role_config="$TASK_TMP/role-preserve.conf"
+role_fit_result="$TASK_TMP/role-fit-result"
+{
+  printf 'ROLE=landing\nRTT_MS=5\nORIGIN_RTT_MS=150\n'
+  printf 'PER_FLOW_MBPS=1000\nTOTAL_MBPS=850\nBURST_MODE=throughput\nSHAPER_MODE=auto\n'
+} >"$role_config"
+printf 'STATUS=fitted\nRECOMMEND_MBPS=680\nKNEE_MBPS=705\n' >"$role_fit_result"
+(
+  FC_CONFIG_FILE="$role_config"
+  FC_FIT_RESULT="$role_fit_result"
+  fc_menu_require_config() { return 0; }
+  fc_apply_all() { return 0; }
+  fc_menu_role <<'EOF' >/dev/null
+2
+
+850
+
+EOF
+)
+check_true 'role switch reuses the latest fitted aggregate rate' grep -q '^TOTAL_MBPS=680$' "$role_config"
+check_true 'relay role keeps its business per-flow policy independent' grep -q '^PER_FLOW_MBPS=850$' "$role_config"
+check_true 'role switch applies the fitted rate with HTB' grep -q '^SHAPER_MODE=htb$' "$role_config"
+check_true 'role switch resets relay RTT to its own baseline' grep -q '^RTT_MS=160$' "$role_config"
+(
+  FC_CONFIG_FILE="$role_config"
+  FC_FIT_RESULT="$role_fit_result"
+  fc_apply_all() { return 0; }
+  fc_profile general
+)
+check_true 'noninteractive profile preserves a trustworthy fitted total' grep -q '^TOTAL_MBPS=680$' "$role_config"
+check_true 'general profile aligns its internal per-flow rate with fitted total' grep -q '^PER_FLOW_MBPS=680$' "$role_config"
+(
+  FC_CONFIG_FILE="$role_config"
+  FC_FIT_RESULT="$role_fit_result"
+  fc_menu_require_config() { return 0; }
+  fc_apply_all() { return 0; }
+  fc_menu_role <<'EOF' >/dev/null
+3
+
+r
+EOF
+)
+check_true 'role switch can clear total shaping before a requested retest' grep -q '^TOTAL_MBPS=0$' "$role_config"
+check_true 'landing role establishes its own RTT baseline before retest' grep -q '^RTT_MS=5$' "$role_config"
 
 mkdir -p "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d"
 printf 'net.ipv4.tcp_congestion_control = bbr\n' >"$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d/legacy.conf"
@@ -362,10 +469,13 @@ check_eq 'public auto peer cannot scan above 2500 Mbps' blocked "$public_high_re
   fc_fit_apply_unshaped_fq() { return 0; }
   fc_fit_restore_managed_qdisc() { return 0; }
   fc_fit_measure() { printf '4012 0 4000\n'; }
-  fc_fit_command --nominal 850 --gap 0 --apply >/dev/null
-)
+  fc_fit_command --nominal 850 --gap 0 --apply
+) >"$TASK_TMP/above-cap-output"
 check_true 'an unshaped result above cap is persisted without scanning' grep -q '^STATUS=above-cap$' "$FC_FIT_RESULT"
 check_true 'above-cap result records the delivered baseline' grep -q '^UNSHAPED_MBPS=4000$' "$FC_FIT_RESULT"
+check_true 'above-cap result explicitly preserves the active config' grep -q '^CONFIG_UNCHANGED=1$' "$FC_FIT_RESULT"
+check_true 'above-cap result records the active per-flow limit' grep -q '^CURRENT_PER_FLOW_MBPS=510$' "$FC_FIT_RESULT"
+check_true 'above-cap output classifies capacity beyond the public range' grep -q '高于 2500 Mbps 公共安全测试范围' "$TASK_TMP/above-cap-output"
 check_true 'fit without --peer persists the selected public endpoint' grep -q '^PEER=auto.test$' "$FC_FIT_RESULT"
 check_true 'fit records the automatically selected peer port' grep -q '^PEER_PORT=5203$' "$FC_FIT_RESULT"
 check_true 'fit records that endpoint selection was automatic' grep -q '^PEER_AUTO=1$' "$FC_FIT_RESULT"
@@ -479,11 +589,11 @@ check_true 'automatic fit persists the clean replacement peer' grep -q '^PEER=go
       printf '%s 10000 500\n' "$fit_current_rate"
     fi
   }
-  FC_FIT_PRE_SCAN_GAP=0 fc_fit_command --peer peer.test --nominal 500 --gap 0 >/dev/null
+  FC_FIT_PRE_SCAN_GAP=0 fc_fit_command --peer peer.test --nominal 300 --gap 0 >/dev/null
 )
 check_true 'tcpfit sweep persists a confirmed fitted result' grep -q '^STATUS=fitted$' "$FC_FIT_RESULT"
 check_true 'fine scan records the final clean knee' grep -q '^KNEE_MBPS=524$' "$FC_FIT_RESULT"
-check_true 'fitted margin is calculated from the nominal band' grep -q '^RECOMMEND_MBPS=509$' "$FC_FIT_RESULT"
+check_true 'fitted margin is calculated from the measured knee band' grep -q '^RECOMMEND_MBPS=509$' "$FC_FIT_RESULT"
 check_true 'fitted result records its loss trigger' grep -q '^BREAK_REASON=loss-spike$' "$FC_FIT_RESULT"
 (
   fit_current_rate=0
@@ -510,7 +620,7 @@ check_true 'fitted result records its loss trigger' grep -q '^BREAK_REASON=loss-
 )
 check_true 'a lossy first point is resolved with a lower-rate control and fine scan' \
   grep -q '^KNEE_MBPS=90$' "$FC_FIT_RESULT"
-check_true 'lower-control fit applies the nominal-band safety margin' grep -q '^RECOMMEND_MBPS=85$' "$FC_FIT_RESULT"
+check_true 'lower-control fit applies the measured-knee safety margin' grep -q '^RECOMMEND_MBPS=85$' "$FC_FIT_RESULT"
 (
   fc_fit_auto_peer() { return 99; }
   fc_fit_apply_test_rate() { return 0; }

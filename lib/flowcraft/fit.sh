@@ -468,20 +468,42 @@ fc_fit_store_result() {
   mv -f "$temp" "$FC_FIT_RESULT"
 }
 
+fc_fit_result_value() {
+  local key="$1"
+  [[ -r "$FC_FIT_RESULT" ]] || return 1
+  awk -F= -v key="$key" '$1==key {print $2; found=1; exit} END {exit !found}' "$FC_FIT_RESULT"
+}
+
+fc_fit_recommendation() {
+  local status recommendation
+  status="$(fc_fit_result_value STATUS || true)"
+  [[ "$status" == fitted ]] || return 1
+  recommendation="$(fc_fit_result_value RECOMMEND_MBPS || true)"
+  fc_is_uint "$recommendation" && ((recommendation >= 1 && recommendation <= 100000)) || return 1
+  printf '%s\n' "$recommendation"
+}
+
 fc_fit_summary() {
   [[ -r "$FC_FIT_RESULT" ]] || {
     printf '尚未执行\n'
     return 0
   }
-  local status recommendation knee
-  status="$(awk -F= '$1=="STATUS" {print $2; exit}' "$FC_FIT_RESULT")"
-  recommendation="$(awk -F= '$1=="RECOMMEND_MBPS" {print $2; exit}' "$FC_FIT_RESULT")"
-  knee="$(awk -F= '$1=="KNEE_MBPS" {print $2; exit}' "$FC_FIT_RESULT")"
-  if [[ "$status" == fitted ]]; then
-    printf '拐点 %s / 建议 %s Mbps\n' "${knee:-?}" "${recommendation:-?}"
-  else
-    printf '%s\n' "${status:-unknown}"
-  fi
+  local status recommendation knee cap unshaped current_total current_per_flow
+  status="$(fc_fit_result_value STATUS || true)"
+  recommendation="$(fc_fit_result_value RECOMMEND_MBPS || true)"
+  knee="$(fc_fit_result_value KNEE_MBPS || true)"
+  cap="$(fc_fit_result_value CAP_MBPS || true)"
+  unshaped="$(fc_fit_result_value UNSHAPED_MBPS || true)"
+  current_total="$(fc_fit_result_value CURRENT_TOTAL_MBPS || true)"
+  current_per_flow="$(fc_fit_result_value CURRENT_PER_FLOW_MBPS || true)"
+  case "$status" in
+    fitted) printf '拐点 %s / 建议 %s Mbps\n' "${knee:-?}" "${recommendation:-?}" ;;
+    above-cap)
+      printf '链路能力 %s Mbps > 测试上限 %s Mbps / 保留整形 %s/%s Mbps\n' \
+        "${unshaped:-?}" "${cap:-?}" "${current_per_flow:-?}" "${current_total:-?}"
+      ;;
+    *) printf '%s\n' "${status:-unknown}" ;;
+  esac
 }
 
 fc_fit_apply_result() {
@@ -781,8 +803,20 @@ fc_fit_command() {
         fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
         fc_fit_store_result 'STATUS=above-cap' "UNSHAPED_MBPS=$unshaped_goodput" \
           "UNSHAPED_LOSS_PCT=$unshaped_loss" "${endpoint_fields[@]}" \
-          "NOMINAL_MBPS=$nominal" "CAP_MBPS=$cap" "CAP_STREAMS=$cap_streams"
-        fc_log "不限速 ${cap_streams} 流送达 ${unshaped_goodput} Mbps，超过 ${cap} Mbps 扫描上限；不应用整形。"
+          "NOMINAL_MBPS=$nominal" "CAP_MBPS=$cap" "CAP_STREAMS=$cap_streams" \
+          "CURRENT_PER_FLOW_MBPS=$PER_FLOW_MBPS" "CURRENT_TOTAL_MBPS=$TOTAL_MBPS" \
+          'CONFIG_UNCHANGED=1'
+        if ((peer_auto == 1)); then
+          fc_log "链路 ${cap_streams} 流能力至少 ${unshaped_goodput} Mbps，高于 ${cap} Mbps 公共安全测试范围。"
+          fc_info "当前 ${PER_FLOW_MBPS}/${TOTAL_MBPS} Mbps 是 Flowcraft 整形策略，不是本次测得的物理拐点；已完整保留。"
+          fc_info '如需寻找更高拐点，请指定自有/独享 iperf3 对端并在菜单设置更高扫描上限。'
+        else
+          fc_log "链路 ${cap_streams} 流能力至少 ${unshaped_goodput} Mbps，高于本次 ${cap} Mbps 测试上限。"
+          fc_info "未在指定范围内找到可应用的 policer 拐点；已保留 ${PER_FLOW_MBPS}/${TOTAL_MBPS} Mbps 整形配置。"
+        fi
+        if awk -v loss="$unshaped_loss" -v threshold="$threshold" 'BEGIN {exit !(loss>threshold)}'; then
+          fc_info "${unshaped_loss}% 丢包发生在 ${unshaped_goodput} Mbps 高速样本，不能据此推导 ${cap} Mbps 以内的 policer 拐点。"
+        fi
         return 0
       fi
       if ! awk -v loss="$unshaped_loss" -v threshold="$threshold" 'BEGIN {exit !(loss>threshold)}'; then
@@ -921,7 +955,7 @@ fc_fit_command() {
     return 0
   fi
   knee="$FC_FIT_LAST_OK"
-  [[ -n "$margin" ]] || margin="$(fc_fit_margin "$nominal")"
+  [[ -n "$margin" ]] || margin="$(fc_fit_margin "$knee")"
   recommendation=$((knee - margin))
   ((recommendation >= 1)) || recommendation="$knee"
   status=fitted
