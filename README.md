@@ -2,7 +2,7 @@
 
 Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内核、TCP 参数、出口整形、状态诊断和可恢复回滚收敛到一个配置所有者中。它用于替代同时安装多套会互相覆盖 `sysctl` 与 root qdisc 的脚本。
 
-> 当前版本：`0.3.0`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
+> 当前版本：`0.3.1`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
 
 ## 能力
 
@@ -106,7 +106,7 @@ ftcp network ipv4-priority on|off
 ftcp nic rps auto|off
 ftcp qdisc fq|fq_codel|fq_pie|cake
 ftcp security audit            只读检查 AEAD/Dirty Frag 风险面
-ftcp fit --peer HOST --nominal MBPS [--apply] [--lift-per-flow]
+ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--apply] [--lift-per-flow]
                                       实测端口 policer 拐点并可应用推荐值
 ftcp experimental max-throughput --yes
 ftcp rollback                  恢复安装前网络状态
@@ -117,14 +117,17 @@ ftcp uninstall                 回滚并移除 Flowcraft
 
 ### 端口拐点实测
 
-`fit` 需要目标机已经完成 Flowcraft 安装，并需要一台靠近目标机、带宽高于目标机端口的 iperf3 服务端：
+`fit` 需要目标机已经完成 Flowcraft 安装。不指定 `--peer` 时，Flowcraft 会并发测量公共节点 RTT，按延迟从低到高轮换 5200–5210 端口，并用短时 iperf3 测试确认节点不是只开端口或正在占线：
 
 ```bash
+sudo ftcp fit --nominal 500
 sudo ftcp fit --peer 192.0.2.10 --nominal 500
-sudo ftcp fit --peer 192.0.2.10 --nominal 500 --apply
+sudo ftcp fit --peer 192.0.2.10 --port 5201 --nominal 500 --apply
 ```
 
-测量阶段会临时切换 root qdisc，并在退出、中断或失败后按当前 Flowcraft 配置重建。默认用单流和 0.1% 丢包阈值识别 policer，扫描上限为 2500 Mbps；结果保存到 `/var/lib/flowcraft/fit-result`。不加 `--apply` 只记录结果，不修改持久配置。
+自动模式默认只接受 RTT 不超过 100 ms 的节点；50 ms 以上会明确提示结果可能偏保守。如果缺少 `ping`、没有可用公共节点，或需要固定测试路径，请自行运行近端 `iperf3 -s` 并用 `--peer` 指定。公共节点由第三方免费提供，存在占线、维护或策略变化；自动发现不会安装软件，也不会修改防火墙。
+
+正式测量阶段才会临时切换 root qdisc，并在退出、中断或失败后按当前 Flowcraft 配置重建。默认用单流和 0.1% 丢包阈值识别 policer，扫描上限为 2500 Mbps；结果保存到 `/var/lib/flowcraft/fit-result`，其中会记录实际对端、端口及是否自动选择。不加 `--apply` 只记录结果，不修改持久配置。
 
 `--apply` 会把建议值写为 Flowcraft 的总出口 HTB+fq 上限。`relay` 的 `PER_FLOW_MBPS` 默认保持不变；只有同时提供 `--lift-per-flow` 才会把单流上限提高到实测推荐值。该测试测量的是目标机到近端对端的出口能力，不代表到最终用户或跨境线路的实际速度。
 

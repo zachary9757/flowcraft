@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_TMP="$(mktemp -d /tmp/flowcraft-tests.XXXXXX)"
 trap 'rm -rf "$TASK_TMP"' EXIT
 
-export FLOWCRAFT_VERSION=0.3.0
+export FLOWCRAFT_VERSION=0.3.1
 export FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
 export FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft"
 export FLOWCRAFT_STATE_DIR="$TASK_TMP/state"
@@ -82,6 +82,28 @@ check_eq 'fit loss uses bandwidth-relative packet estimate' 0.0322 "$(fc_fit_los
 check_eq 'fit bounds expand above lossy goodput' '285 393 11' "$(fc_fit_scan_bounds 300 3 2500)"
 check_true 'fit spike exceeds absolute threshold' fc_fit_is_spike 0.2 0 0.1
 check_false 'fit stable baseline is not a spike' fc_fit_is_spike 0.3 0.1 0.1
+auto_peer_result="$TASK_TMP/auto-peer-result"
+(
+  FC_FIT_PEER_POOL=$'far.test|远端|Test\nnear.test|近端|Test\nmid.test|中端|Test'
+  FC_FIT_PEER_IDEAL_RTT=50
+  FC_FIT_PEER_MAX_RTT=100
+  fc_fit_ping_rtt() {
+    case "$1" in
+      far.test) printf '90\n' ;;
+      near.test) printf '8\n' ;;
+      mid.test) printf '30\n' ;;
+    esac
+  }
+  fc_fit_find_working_port() {
+    [[ "$1" == mid.test ]] && printf '5203\n'
+  }
+  fc_fit_auto_peer -4 >"$auto_peer_result" 2>/dev/null
+)
+check_eq 'auto peer tries candidates by RTT and skips an unavailable nearest node' \
+  'mid.test|5203|30|中端|Test' "$(<"$auto_peer_result")"
+check_eq 'fit port order starts with the probed port and does not duplicate it' \
+  '5203 5201 5202 5204 5205 5206 5207 5208 5209 5210 5200' \
+  "$(fc_fit_port_order 5203 | xargs)"
 fit_queue="$TASK_TMP/fit-queue"
 fit_scan_result="$TASK_TMP/fit-scan-result"
 printf '100 0 99\n110 10000 80\n110 10000 80\n110 10000 80\n' >"$fit_queue"
@@ -157,7 +179,7 @@ usage_output="$(fc_usage)"
 check_true 'usage exposes the ftcp command' grep -q '^  ftcp fit ' <<<"$usage_output"
 check_false 'usage removes benchmark command' grep -q 'benchmark' <<<"$usage_output"
 check_false 'usage does not expose the old flowcraft command' grep -q '^  flowcraft' <<<"$usage_output"
-check_eq 'version uses the short command name' 'ftcp 0.3.0' "$(fc_main version)"
+check_eq 'version uses the short command name' 'ftcp 0.3.1' "$(fc_main version)"
 role_guide="$(fc_print_role_guide)"
 check_true 'role guide includes 500M reference' grep -q '500M 家宽.*430.*450' <<<"$role_guide"
 check_true 'role guide includes 1G and 2.5G references' grep -q '2.5G 端口.*2300' <<<"$role_guide"
@@ -284,11 +306,23 @@ check_true 'fit persists HTB as the Flowcraft-owned shaper' grep -q '^SHAPER_MOD
 check_true 'fit apply uses HTB plus fq at the measured rate' grep -q 'qdisc add dev eth-test parent 1:10 handle 10: fq.*maxrate 510mbit' "$FLOWCRAFT_TC_LOG"
 printf 'STAGE=complete\n' >"$FC_STAGE_FILE"
 (
+  fc_fit_auto_peer() { printf 'auto.test|5203|8|近端|Test\n'; }
   fc_fit_measure() { printf '490 0 485\n'; }
-  fc_fit_command --peer peer.test --nominal 500 --apply >/dev/null
+  fc_fit_command --nominal 500 --apply >/dev/null
 )
 check_true 'no-knee fit result is persisted' grep -q '^STATUS=no-knee$' "$FC_FIT_RESULT"
+check_true 'fit without --peer persists the selected public endpoint' grep -q '^PEER=auto.test$' "$FC_FIT_RESULT"
+check_true 'fit records the automatically selected peer port' grep -q '^PEER_PORT=5203$' "$FC_FIT_RESULT"
+check_true 'fit records that endpoint selection was automatic' grep -q '^PEER_AUTO=1$' "$FC_FIT_RESULT"
 check_true 'applying no-knee result removes aggregate shaping' grep -q '^TOTAL_MBPS=0$' "$FLOWCRAFT_CONFIG_FILE"
+(
+  fc_fit_auto_peer() { return 99; }
+  fc_fit_measure() { printf '490 0 485\n'; }
+  fc_fit_command --peer peer.test --port 5209 --nominal 500 >/dev/null
+)
+check_true 'explicit peer bypasses automatic discovery' grep -q '^PEER=peer.test$' "$FC_FIT_RESULT"
+check_true 'explicit peer keeps the requested port' grep -q '^PEER_PORT=5209$' "$FC_FIT_RESULT"
+check_true 'fit records that an explicit endpoint was used' grep -q '^PEER_AUTO=0$' "$FC_FIT_RESULT"
 
 fc_parse_install_options --non-interactive --total 2300 --role relay --kernel skip
 check_eq 'CLI precedence is independent of option order' 2300 "$TOTAL_MBPS"

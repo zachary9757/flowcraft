@@ -642,18 +642,16 @@ fc_menu_fit() {
   fc_menu_require_config || return 1
   fc_load_config
   local peer nominal answer
-  printf '需要一台靠近本机、带宽高于本机端口的 iperf3 服务端。\n'
-  read -r -p '对端 IP / 域名: ' peer
-  [[ -n "$peer" ]] || {
-    fc_warn '必须指定测速对端。'
-    return 1
-  }
+  printf '可指定靠近本机、带宽高于本机端口的 iperf3 服务端。\n'
+  printf '直接回车会从公共节点中按 RTT 和实际可用端口自动选择。\n'
+  read -r -p '对端 IP / 域名 [自动]: ' peer
   nominal="$TOTAL_MBPS"
   ((nominal > 0)) || nominal="$PER_FLOW_MBPS"
   read -r -p "标称端口带宽 Mbps [$nominal]: " answer
   nominal="${answer:-$nominal}"
   read -r -p '测量完成后自动应用推荐值？[y/N]: ' answer
-  local -a args=(--peer "$peer" --nominal "$nominal")
+  local -a args=(--nominal "$nominal")
+  [[ -z "$peer" ]] || args+=(--peer "$peer")
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     args+=(--apply)
     if [[ "$ROLE" == relay ]]; then
@@ -735,7 +733,7 @@ Flowcraft - BBRv3、TCP 调优、监控与出口整形
   ftcp nic rps auto|off
   ftcp qdisc fq|fq_codel|fq_pie|cake
   ftcp security audit            只读内核风险面审计
-  ftcp fit --peer HOST --nominal MBPS [--apply] [--lift-per-flow]
+  ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--apply] [--lift-per-flow]
                                       实测端口 policer 拐点并可写回 Flowcraft
   ftcp experimental max-throughput --yes
   ftcp rollback                  恢复安装前网络状态

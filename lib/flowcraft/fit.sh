@@ -1,8 +1,143 @@
 #!/usr/bin/env bash
 
-# Policer measurement adapted from MIT-licensed Kylin010/tcpfit commit
-# 67c0bdfb35dd98e86982600298237b6ecc08ebe4. Flowcraft remains the only
+# Policer measurement adapted from MIT-licensed Kylin010/tcpfit. Flowcraft remains the only
 # persistent sysctl, qdisc, service, configuration, and rollback owner.
+
+FC_FIT_PEER_POOL="${FC_FIT_PEER_POOL:-
+speedtest.hkg12.hk.leaseweb.net|香港|Leaseweb
+speedtest.sin1.sg.leaseweb.net|新加坡|Leaseweb
+sgp.proof.ovh.net|新加坡|OVH
+speedtest.syd12.au.leaseweb.net|悉尼|Leaseweb
+speedtest.tyo11.jp.leaseweb.net|东京|Leaseweb
+speedtest.fra1.de.leaseweb.net|法兰克福|Leaseweb
+speedtest.ams2.nl.leaseweb.net|阿姆斯特丹|Leaseweb
+ams.speedtest.clouvider.net|阿姆斯特丹|Clouvider
+speedtest.lon12.uk.leaseweb.net|伦敦|Leaseweb
+lon.speedtest.clouvider.net|伦敦|Clouvider
+speedtest.lax12.us.leaseweb.net|洛杉矶|Leaseweb
+speedtest.sfo12.us.leaseweb.net|旧金山|Leaseweb
+speedtest.sea11.us.leaseweb.net|西雅图|Leaseweb
+speedtest.dal13.us.leaseweb.net|达拉斯|Leaseweb
+speedtest.chi11.us.leaseweb.net|芝加哥|Leaseweb
+speedtest.nyc1.us.leaseweb.net|纽约|Leaseweb
+speedtest.mia11.us.leaseweb.net|迈阿密|Leaseweb
+speedtest.mtl2.ca.leaseweb.net|蒙特利尔|Leaseweb
+}"
+FC_FIT_PORT_POOL="${FC_FIT_PORT_POOL:-5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5200}"
+FC_FIT_PROBE_PORTS="${FC_FIT_PROBE_PORTS:-5201 5202 5203 5200}"
+FC_FIT_PEER_IDEAL_RTT="${FC_FIT_PEER_IDEAL_RTT:-50}"
+FC_FIT_PEER_MAX_RTT="${FC_FIT_PEER_MAX_RTT:-100}"
+FC_FIT_PING_CONCURRENCY="${FC_FIT_PING_CONCURRENCY:-6}"
+
+fc_fit_port_order() {
+  local preferred="$1" candidate
+  local -a candidates=()
+  IFS=' ' read -r -a candidates <<<"$FC_FIT_PORT_POOL"
+  printf '%s\n' "$preferred"
+  for candidate in "${candidates[@]}"; do
+    [[ "$candidate" == "$preferred" ]] || printf '%s\n' "$candidate"
+  done
+}
+
+fc_fit_ping_rtt() {
+  local peer="$1" family="$2"
+  LC_ALL=C ping "$family" -c 2 -q -W 2 "$peer" 2>/dev/null |
+    awk -F/ '/rtt|round-trip/ {printf "%.0f\n", $5; exit}'
+}
+
+fc_fit_probe_tcp_port() {
+  local peer="$1" port="$2"
+  local -a timeout_args=()
+  timeout --foreground 1 true >/dev/null 2>&1 && timeout_args+=(--foreground)
+  timeout "${timeout_args[@]}" 4 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$peer" "$port" \
+    >/dev/null 2>&1
+}
+
+fc_fit_probe_peer_port() {
+  local peer="$1" candidate
+  local -a candidates=()
+  IFS=' ' read -r -a candidates <<<"$FC_FIT_PROBE_PORTS"
+  for candidate in "${candidates[@]}"; do
+    if fc_fit_probe_tcp_port "$peer" "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+fc_fit_find_working_port() {
+  local peer="$1" family="$2" first candidate
+  first="$(fc_fit_probe_peer_port "$peer" || true)"
+  [[ -n "$first" ]] || return 1
+  while IFS= read -r candidate; do
+    if fc_fit_run_iperf "$peer" "$candidate" 3 1 "$family" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(fc_fit_port_order "$first")
+  return 1
+}
+
+fc_fit_auto_peer() {
+  local family="$1" temp_dir sorted='' candidate name provider rtt port file
+  local running=0 index=0 concurrency="$FC_FIT_PING_CONCURRENCY"
+  local ideal="$FC_FIT_PEER_IDEAL_RTT" maximum="$FC_FIT_PEER_MAX_RTT"
+  fc_has ping || {
+    fc_warn '本机缺少 ping，无法自动选择对端。请安装 iputils-ping，或使用 --peer 指定。' >&2
+    return 1
+  }
+  fc_is_uint "$concurrency" && ((concurrency >= 1 && concurrency <= 18)) || concurrency=6
+  fc_is_uint "$ideal" && ((ideal >= 1)) || ideal=50
+  fc_is_uint "$maximum" && ((maximum >= ideal)) || maximum=100
+  temp_dir="$(mktemp -d /tmp/flowcraft-peer.XXXXXX)"
+  fc_info '正在按 RTT 筛选公共 iperf3 对端，并验证空闲端口…' >&2
+  while IFS='|' read -r candidate name provider; do
+    [[ -n "$candidate" ]] || continue
+    index=$((index + 1))
+    (
+      rtt="$(fc_fit_ping_rtt "$candidate" "$family" || true)"
+      if [[ "$rtt" =~ ^[0-9]+$ ]]; then
+        printf '%s|%s|%s|%s\n' "$rtt" "$candidate" "$name" "$provider" >"$temp_dir/$index"
+      fi
+      exit 0
+    ) &
+    running=$((running + 1))
+    if ((running >= concurrency)); then
+      wait || true
+      running=0
+    fi
+  done <<<"$FC_FIT_PEER_POOL"
+  wait || true
+  for file in "$temp_dir"/*; do
+    [[ -f "$file" ]] && sorted+="$(<"$file")"$'\n'
+  done
+  rm -rf -- "$temp_dir"
+  [[ -n "$sorted" ]] || {
+    fc_warn '公共节点均未返回 RTT；请检查 DNS、ICMP 或使用 --peer 指定。' >&2
+    return 1
+  }
+  while IFS='|' read -r rtt candidate name provider; do
+    [[ -n "$candidate" ]] || continue
+    if ((rtt > maximum)); then
+      printf '[SKIP] %s (%s/%s) RTT %sms，超过 %sms 上限。\n' "$candidate" "$name" "$provider" "$rtt" "$maximum" >&2
+      continue
+    fi
+    printf '[INFO] 验证 %s (%s/%s)，RTT %sms…\n' "$candidate" "$name" "$provider" "$rtt" >&2
+    port="$(fc_fit_find_working_port "$candidate" "$family" || true)"
+    [[ -n "$port" ]] || {
+      printf '[SKIP] 节点端口不可用或当前占线。\n' >&2
+      continue
+    }
+    if ((rtt > ideal)); then
+      fc_warn "最近可用对端 RTT ${rtt}ms，高于理想值 ${ideal}ms；拐点结果可能偏保守。" >&2
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$candidate" "$port" "$rtt" "$name" "$provider"
+    return 0
+  done < <(printf '%s' "$sorted" | sort -t '|' -k1,1n)
+  fc_warn "未找到 ${maximum}ms 内且可实际运行 iperf3 的公共节点；请稍后重试或使用 --peer。" >&2
+  return 1
+}
 
 fc_fit_margin() {
   local bandwidth="$1"
@@ -256,7 +391,8 @@ fc_fit_restore_managed_qdisc() {
 
 fc_fit_command() {
   local peer='' nominal='' port=5201 family=-4 duration=12 gap=3 cap=2500 threshold=0.1
-  local apply=0 lift_per_flow=0 argument
+  local apply=0 lift_per_flow=0 port_explicit=0 peer_auto=0 argument
+  local selected_peer='' peer_rtt='' peer_name='' peer_provider=''
   while (($#)); do
     argument="$1"
     case "$argument" in
@@ -273,6 +409,7 @@ fc_fit_command() {
       --port)
         [[ $# -ge 2 ]] || fc_die '--port 缺少值'
         port="$2"
+        port_explicit=1
         shift 2
         ;;
       --duration)
@@ -311,8 +448,8 @@ fc_fit_command() {
     esac
   done
   [[ -r "$FC_CONFIG_FILE" ]] || fc_die '请先完成 Flowcraft 安装，再运行 fit。'
-  [[ -n "$peer" ]] || fc_die '需要 --peer <附近的 iperf3 服务端>。'
-  [[ "$peer" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || fc_die 'peer 格式无效。'
+  [[ -n "$peer" || "$port_explicit" == 0 ]] || fc_die '--port 只能与 --peer 一起使用。'
+  [[ -z "$peer" || "$peer" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || fc_die 'peer 格式无效。'
   fc_is_uint "$nominal" && ((nominal >= 1 && nominal <= 100000)) || fc_die '--nominal 必须是 1-100000 的整数 Mbps。'
   fc_is_uint "$port" && ((port >= 1 && port <= 65535)) || fc_die '--port 必须是 1-65535 的整数。'
   fc_is_uint "$duration" && ((duration >= 1 && duration <= 600)) || fc_die '--duration 必须是 1-600 秒。'
@@ -330,8 +467,21 @@ fc_fit_command() {
   fc_has timeout && fc_has tc || fc_die 'fit 需要 timeout 和 tc。'
   fc_load_config
   [[ "$(fc_read_stage_value STAGE)" == complete ]] || fc_die 'Flowcraft 安装尚未完成；请先运行 ftcp resume。'
+  if [[ -z "$peer" ]]; then
+    selected_peer="$(fc_fit_auto_peer "$family" || true)"
+    [[ -n "$selected_peer" ]] || fc_die '自动选择测速对端失败；请稍后重试或使用 --peer 指定。'
+    IFS='|' read -r peer port peer_rtt peer_name peer_provider <<<"$selected_peer"
+    [[ "$peer" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || fc_die '自动选择返回了无效 peer。'
+    fc_is_uint "$port" && ((port >= 1 && port <= 65535)) || fc_die '自动选择返回了无效端口。'
+    peer_auto=1
+    fc_info "已选择 ${peer}:${port}（${peer_name}/${peer_provider}，RTT ${peer_rtt}ms）。"
+  fi
   local iface mem result sender retransmits goodput loss best_result best_goodput _sample aggregate
   local bounds low high step status recommendation='' knee='' margin coarse_broke fine control attempts
+  local -a endpoint_fields=("PEER=$peer" "PEER_PORT=$port" "PEER_AUTO=$peer_auto")
+  if ((peer_auto == 1)); then
+    endpoint_fields+=("PEER_RTT_MS=$peer_rtt" "PEER_NAME=$peer_name" "PEER_PROVIDER=$peer_provider")
+  fi
   iface="$(fc_resolve_iface)"
   mem="$(fc_mem_mb)"
   ((mem > 0)) || mem=1024
@@ -384,14 +534,16 @@ fc_fit_command() {
   if awk -v goodput="$goodput" -v cap="$cap" 'BEGIN {exit !(goodput>cap)}'; then
     status=above-cap
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=above-cap' "UNSHAPED_MBPS=$goodput" "CAP_MBPS=$cap" "PEER=$peer" "NOMINAL_MBPS=$nominal"
+    fc_fit_store_result 'STATUS=above-cap' "UNSHAPED_MBPS=$goodput" "CAP_MBPS=$cap" \
+      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
     fc_warn "未整形吞吐 ${goodput} Mbps 超过扫描上限 ${cap} Mbps；未修改持久配置。"
     return 0
   fi
   if awk -v loss="$loss" -v threshold="$threshold" 'BEGIN {exit !(loss<=threshold)}'; then
     status=no-knee
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=no-knee' "UNSHAPED_MBPS=$goodput" "LOSS_PCT=$loss" "PEER=$peer" "NOMINAL_MBPS=$nominal"
+    fc_fit_store_result 'STATUS=no-knee' "UNSHAPED_MBPS=$goodput" "LOSS_PCT=$loss" \
+      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
     fc_info "未整形丢包 ${loss}%，未发现 policer。"
     ((apply == 0)) || fc_fit_apply_result "$status" '' "$lift_per_flow"
     return 0
@@ -438,7 +590,8 @@ fc_fit_command() {
   if [[ -z "$FC_FIT_BROKE_AT" ]]; then
     status=out-of-range
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=out-of-range' "SCANNED_TO_MBPS=$high" "UNSHAPED_LOSS_PCT=$loss" "PEER=$peer" "NOMINAL_MBPS=$nominal"
+    fc_fit_store_result 'STATUS=out-of-range' "SCANNED_TO_MBPS=$high" "UNSHAPED_LOSS_PCT=$loss" \
+      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
     fc_warn "扫描到 ${high} Mbps 仍未定位拐点；未修改持久配置。"
     return 0
   fi
@@ -462,7 +615,7 @@ fc_fit_command() {
   status=fitted
   fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
   fc_fit_store_result 'STATUS=fitted' "KNEE_MBPS=$knee" "MARGIN_MBPS=$margin" "RECOMMEND_MBPS=$recommendation" \
-    "PEER=$peer" "NOMINAL_MBPS=$nominal" "LOSS_THRESHOLD_PCT=$threshold"
+    "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "LOSS_THRESHOLD_PCT=$threshold"
   fc_log "实测干净上限 ${knee} Mbps，安全余量 ${margin} Mbps，建议整形 ${recommendation} Mbps。"
   if ((apply == 1)); then
     fc_fit_apply_result "$status" "$recommendation" "$lift_per_flow"
