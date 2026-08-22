@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_TMP="$(mktemp -d /tmp/flowcraft-tests.XXXXXX)"
 trap 'rm -rf "$TASK_TMP"' EXIT
 
-export FLOWCRAFT_VERSION=0.3.1
+export FLOWCRAFT_VERSION=0.4.0
 export FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
 export FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft"
 export FLOWCRAFT_STATE_DIR="$TASK_TMP/state"
@@ -79,7 +79,12 @@ check_eq 'fit margin at 30M' 1 "$(fc_fit_margin 30)"
 check_eq 'fit margin at 500M' 15 "$(fc_fit_margin 500)"
 check_eq 'fit margin above 1G' 40 "$(fc_fit_margin 2500)"
 check_eq 'fit loss uses bandwidth-relative packet estimate' 0.0322 "$(fc_fit_loss_pct 100 300 12)"
-check_eq 'fit bounds expand above lossy goodput' '285 393 11' "$(fc_fit_scan_bounds 300 3 2500)"
+check_eq 'fit default ceiling is 125 percent of nominal' 1062 "$(fc_fit_default_ceiling 850)"
+check_eq 'fit bounded plan stays around nominal' '425 595 722 850 935 1062' \
+  "$(fc_fit_coarse_points 850 1062 0 | xargs)"
+check_eq 'fit discover plan expands progressively but stops at ceiling' \
+  '425 595 722 850 935 1062 1593 2389 3583 5374 6000' \
+  "$(fc_fit_coarse_points 850 6000 1 | xargs)"
 check_true 'fit spike exceeds absolute threshold' fc_fit_is_spike 0.2 0 0.1
 check_false 'fit stable baseline is not a spike' fc_fit_is_spike 0.3 0.1 0.1
 auto_peer_result="$TASK_TMP/auto-peer-result"
@@ -119,10 +124,12 @@ printf '100 0 99\n110 10000 80\n110 10000 80\n110 10000 80\n' >"$fit_queue"
   FC_FIT_BASE_LOSS=''
   FC_FIT_SLOW_HITS=0
   FC_FIT_PEER_SLOW=0
-  fc_fit_scan_range eth-test peer.test 5201 -4 12 0 0.1 100 110 10 2048 >/dev/null
+  fc_fit_scan_range eth-test peer.test 5201 -4 12 0 0.1 100 110 10 2048 110 >/dev/null
   printf '%s %s\n' "$FC_FIT_LAST_OK" "$FC_FIT_BROKE_AT" >"$fit_scan_result"
 )
 check_eq 'fit scan keeps last clean rate and confirms 2-of-3 spike' '100 110' "$(<"$fit_scan_result")"
+check_false 'fit scan refuses a range above its hard ceiling' \
+  fc_fit_scan_range eth-test peer.test 5201 -4 12 0 0.1 100 120 10 2048 110
 check_eq '1 CPU mask' 1 "$(fc_cpu_mask 1)"
 check_eq '32 CPU mask' ffffffff "$(fc_cpu_mask 32)"
 check_eq '33 CPU mask' 1,ffffffff "$(fc_cpu_mask 33)"
@@ -179,7 +186,7 @@ usage_output="$(fc_usage)"
 check_true 'usage exposes the ftcp command' grep -q '^  ftcp fit ' <<<"$usage_output"
 check_false 'usage removes benchmark command' grep -q 'benchmark' <<<"$usage_output"
 check_false 'usage does not expose the old flowcraft command' grep -q '^  flowcraft' <<<"$usage_output"
-check_eq 'version uses the short command name' 'ftcp 0.3.1' "$(fc_main version)"
+check_eq 'version uses the short command name' 'ftcp 0.4.0' "$(fc_main version)"
 role_guide="$(fc_print_role_guide)"
 check_true 'role guide includes 500M reference' grep -q '500M 家宽.*430.*450' <<<"$role_guide"
 check_true 'role guide includes 1G and 2.5G references' grep -q '2.5G 端口.*2300' <<<"$role_guide"
@@ -235,6 +242,7 @@ exit 0
 MOCK
 cat >"$mock_bin/iperf3" <<'MOCK'
 #!/usr/bin/env bash
+[[ -n "${FLOWCRAFT_IPERF_LOG:-}" ]] && printf '%s\n' "$*" >>"$FLOWCRAFT_IPERF_LOG"
 printf '[  5]   0.00-10.00  sec   596 MBytes   500 Mbits/sec   12 sender\n'
 printf '[  5]   0.00-10.00  sec   584 MBytes   490 Mbits/sec      receiver\n'
 MOCK
@@ -261,10 +269,15 @@ PATH="$mock_bin:$PATH"
 export PATH
 export FLOWCRAFT_SYSCTL_LOG="$TASK_TMP/sysctl.log"
 export FLOWCRAFT_TC_LOG="$TASK_TMP/tc.log"
+export FLOWCRAFT_IPERF_LOG="$TASK_TMP/iperf.log"
 : >"$FLOWCRAFT_SYSCTL_LOG"
 : >"$FLOWCRAFT_TC_LOG"
+: >"$FLOWCRAFT_IPERF_LOG"
 
 check_eq 'iperf3 sender receiver and retransmits are parsed as one sample' '500 12 490' "$(fc_fit_run_iperf peer.test 5201 10 1 -4)"
+fc_fit_probe_iperf peer.test 5201 -4
+check_true 'peer capability probe limits transfer by bytes' grep -q -- '-n 1M' "$FLOWCRAFT_IPERF_LOG"
+check_false 'peer capability probe is not a duration-based unlimited test' grep -q -- '-t 3' "$FLOWCRAFT_IPERF_LOG"
 
 FC_DRY_RUN=1
 dry_output="$(fc_write_sysctl_profile 2>&1)"
@@ -304,21 +317,94 @@ check_true 'fit persists measured aggregate rate' grep -q '^TOTAL_MBPS=510$' "$F
 check_true 'general fit lifts single-flow ceiling with aggregate rate' grep -q '^PER_FLOW_MBPS=510$' "$FLOWCRAFT_CONFIG_FILE"
 check_true 'fit persists HTB as the Flowcraft-owned shaper' grep -q '^SHAPER_MODE=htb$' "$FLOWCRAFT_CONFIG_FILE"
 check_true 'fit apply uses HTB plus fq at the measured rate' grep -q 'qdisc add dev eth-test parent 1:10 handle 10: fq.*maxrate 510mbit' "$FLOWCRAFT_TC_LOG"
+fc_fit_apply_result clean-through-envelope '' 0 >/dev/null
+check_true 'a non-fitted result never removes existing aggregate shaping' grep -q '^TOTAL_MBPS=510$' "$FLOWCRAFT_CONFIG_FILE"
 printf 'STAGE=complete\n' >"$FC_STAGE_FILE"
+public_high_result=blocked
+if (fc_fit_command --nominal 850 --discover --ceiling 6000 >/dev/null 2>&1); then
+  public_high_result=allowed
+fi
+check_eq 'public auto peer cannot be used for discovery above 2500 Mbps' blocked "$public_high_result"
+fit_rate_log="$TASK_TMP/fit-rates.log"
+: >"$fit_rate_log"
 (
   fc_fit_auto_peer() { printf 'auto.test|5203|8|近端|Test\n'; }
-  fc_fit_measure() { printf '490 0 485\n'; }
-  fc_fit_command --nominal 500 --apply >/dev/null
+  fc_fit_apply_test_rate() {
+    printf '%s\n' "$2" >>"$fit_rate_log"
+    return 0
+  }
+  fc_fit_measure() { printf '500 0 495\n'; }
+  fc_fit_command --nominal 500 --gap 0 --apply >/dev/null
 )
-check_true 'no-knee fit result is persisted' grep -q '^STATUS=no-knee$' "$FC_FIT_RESULT"
+check_true 'clean bounded fit result is persisted' grep -q '^STATUS=clean-through-envelope$' "$FC_FIT_RESULT"
 check_true 'fit without --peer persists the selected public endpoint' grep -q '^PEER=auto.test$' "$FC_FIT_RESULT"
 check_true 'fit records the automatically selected peer port' grep -q '^PEER_PORT=5203$' "$FC_FIT_RESULT"
 check_true 'fit records that endpoint selection was automatic' grep -q '^PEER_AUTO=1$' "$FC_FIT_RESULT"
-check_true 'applying no-knee result removes aggregate shaping' grep -q '^TOTAL_MBPS=0$' "$FLOWCRAFT_CONFIG_FILE"
+check_true 'clean bounded result leaves aggregate shaping unchanged' grep -q '^TOTAL_MBPS=510$' "$FLOWCRAFT_CONFIG_FILE"
+check_eq 'ordinary fit never tests above its derived ceiling' 625 "$(sort -n "$fit_rate_log" | tail -n 1)"
+peer_rotation_log="$TASK_TMP/peer-rotation.log"
+: >"$peer_rotation_log"
+(
+  fc_fit_auto_peer() {
+    if [[ "${2:-}" == *'bad.test'* ]]; then
+      printf 'good.test|5202|12|良好|Test\n'
+    else
+      printf 'bad.test|5201|8|脏路径|Test\n'
+    fi
+  }
+  fc_fit_validate_path() {
+    printf '%s\n' "$2" >>"$peer_rotation_log"
+    FC_FIT_HEALTH_RATE=100
+    FC_FIT_HEALTH_GOODPUT=99
+    if [[ "$2" == bad.test ]]; then
+      FC_FIT_HEALTH_STATUS='dirty-path'
+      FC_FIT_HEALTH_LOSS=1.2
+      return 1
+    fi
+    FC_FIT_HEALTH_STATUS=clean
+    FC_FIT_HEALTH_LOSS=0
+    FC_FIT_BASE_LOSS=0
+  }
+  fc_fit_scan_range() {
+    FC_FIT_LAST_OK="$8"
+    return 0
+  }
+  fc_fit_command --nominal 500 --gap 0 >/dev/null
+)
+check_eq 'automatic fit rotates away from a dirty low-rate path' $'bad.test\ngood.test' "$(<"$peer_rotation_log")"
+check_true 'automatic fit persists the clean replacement peer' grep -q '^PEER=good.test$' "$FC_FIT_RESULT"
+fit_command_queue="$TASK_TMP/fit-command-queue"
+printf '%s\n' \
+  '100 0 99' \
+  '250 0 249' \
+  '350 0 349' \
+  '425 0 424' \
+  '500 0 499' \
+  '550 10000 500' \
+  '550 10000 500' \
+  '550 10000 500' \
+  '510 0 509' \
+  '520 0 519' \
+  '530 10000 480' \
+  '530 10000 480' \
+  '530 10000 480' >"$fit_command_queue"
+(
+  fc_fit_apply_test_rate() { return 0; }
+  fc_fit_measure() {
+    sed -n '1p' "$fit_command_queue"
+    tail -n +2 "$fit_command_queue" >"${fit_command_queue}.next"
+    mv -f "${fit_command_queue}.next" "$fit_command_queue"
+  }
+  fc_fit_command --peer peer.test --nominal 500 --gap 0 >/dev/null
+)
+check_true 'bounded command persists a confirmed fitted result' grep -q '^STATUS=fitted$' "$FC_FIT_RESULT"
+check_true 'fine scan records the final clean knee' grep -q '^KNEE_MBPS=520$' "$FC_FIT_RESULT"
+check_true 'fitted margin is calculated from the measured knee' grep -q '^RECOMMEND_MBPS=505$' "$FC_FIT_RESULT"
 (
   fc_fit_auto_peer() { return 99; }
-  fc_fit_measure() { printf '490 0 485\n'; }
-  fc_fit_command --peer peer.test --port 5209 --nominal 500 >/dev/null
+  fc_fit_apply_test_rate() { return 0; }
+  fc_fit_measure() { printf '500 0 495\n'; }
+  fc_fit_command --peer peer.test --port 5209 --nominal 500 --gap 0 >/dev/null
 )
 check_true 'explicit peer bypasses automatic discovery' grep -q '^PEER=peer.test$' "$FC_FIT_RESULT"
 check_true 'explicit peer keeps the requested port' grep -q '^PEER_PORT=5209$' "$FC_FIT_RESULT"

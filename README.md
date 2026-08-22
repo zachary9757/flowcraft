@@ -2,7 +2,7 @@
 
 Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内核、TCP 参数、出口整形、状态诊断和可恢复回滚收敛到一个配置所有者中。它用于替代同时安装多套会互相覆盖 `sysctl` 与 root qdisc 的脚本。
 
-> 当前版本：`0.3.1`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
+> 当前版本：`0.4.0`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
 
 ## 能力
 
@@ -107,7 +107,8 @@ ftcp nic rps auto|off
 ftcp qdisc fq|fq_codel|fq_pie|cake
 ftcp security audit            只读检查 AEAD/Dirty Frag 风险面
 ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--apply] [--lift-per-flow]
-                                      实测端口 policer 拐点并可应用推荐值
+ftcp fit --peer HOST --nominal MBPS --discover --ceiling MBPS [--apply]
+                                      有界实测端口 policer 拐点
 ftcp experimental max-throughput --yes
 ftcp rollback                  恢复安装前网络状态
 ftcp uninstall                 回滚并移除 Flowcraft
@@ -117,17 +118,24 @@ ftcp uninstall                 回滚并移除 Flowcraft
 
 ### 端口拐点实测
 
-`fit` 需要目标机已经完成 Flowcraft 安装。不指定 `--peer` 时，Flowcraft 会并发测量公共节点 RTT，按延迟从低到高轮换 5200–5210 端口，并用短时 iperf3 测试确认节点不是只开端口或正在占线：
+`fit` 需要目标机已经完成 Flowcraft 安装。不指定 `--peer` 时，Flowcraft 会并发测量公共节点 RTT，按延迟从低到高轮换 5200–5210 端口，并用固定 1 MB 数据量确认 iperf3 服务可用：
 
 ```bash
 sudo ftcp fit --nominal 500
 sudo ftcp fit --peer 192.0.2.10 --nominal 500
 sudo ftcp fit --peer 192.0.2.10 --port 5201 --nominal 500 --apply
+sudo ftcp fit --peer 192.0.2.10 --nominal 850 --discover --ceiling 6000
 ```
 
-自动模式默认只接受 RTT 不超过 100 ms 的节点；50 ms 以上会明确提示结果可能偏保守。如果缺少 `ping`、没有可用公共节点，或需要固定测试路径，请自行运行近端 `iperf3 -s` 并用 `--peer` 指定。公共节点由第三方免费提供，存在占线、维护或策略变化；自动发现不会安装软件，也不会修改防火墙。
+普通模式不再进行不限速基线测试。它先在标称值 20%（最高 200 Mbps）执行路径健康检查，再按 50%、70%、85%、100%、110%、125% 有界递增；任何档位都不得超过本次 ceiling。850 Mbps 标称值默认只会测试到 1062 Mbps。如果范围内全部干净，结果为 `clean-through-envelope`，即使提供 `--apply` 也保留原有配置。
 
-正式测量阶段才会临时切换 root qdisc，并在退出、中断或失败后按当前 Flowcraft 配置重建。默认用单流和 0.1% 丢包阈值识别 policer，扫描上限为 2500 Mbps；结果保存到 `/var/lib/flowcraft/fit-result`，其中会记录实际对端、端口及是否自动选择。不加 `--apply` 只记录结果，不修改持久配置。
+只有 `fitted`（已经通过 2/3 复测找到可信拐点）允许自动应用。`dirty-path`、`peer-too-slow`、`measurement-failed`、`shaper-failed` 和 `clean-through-envelope` 都只记录结果。安全余量根据实测干净上限计算，而不是根据输入的标称值计算。
+
+需要继续寻找高于 125% 标称值的真实极限时，必须显式使用 `--discover --ceiling`。公共节点最高允许 2500 Mbps；更高速率必须用 `--peer` 指定近端独享服务器。旧 `--cap N` 暂时兼容为 `--discover --ceiling N`，运行时会显示迁移提示。
+
+自动模式默认只接受 RTT 不超过 100 ms 的节点；50 ms 以上会明确提示结果可能偏保守。低速健康检查发现路径脏或对端过慢时会自动换节点，最多尝试三个。公共节点由第三方免费提供，存在占线、维护或策略变化；自动发现不会安装软件，也不会修改防火墙。
+
+每个测量档位都会先安装对应的临时 HTB，退出、中断或失败后按当前 Flowcraft 配置重建 root qdisc。结果保存在 `/var/lib/flowcraft/fit-result`，包含测试范围、实际对端、端口、RTT 与是否自动选择。
 
 `--apply` 会把建议值写为 Flowcraft 的总出口 HTB+fq 上限。`relay` 的 `PER_FLOW_MBPS` 默认保持不变；只有同时提供 `--lift-per-flow` 才会把单流上限提高到实测推荐值。该测试测量的是目标机到近端对端的出口能力，不代表到最终用户或跨境线路的实际速度。
 

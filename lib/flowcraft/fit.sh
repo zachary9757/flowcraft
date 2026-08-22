@@ -66,12 +66,20 @@ fc_fit_probe_peer_port() {
   return 1
 }
 
+fc_fit_probe_iperf() {
+  local peer="$1" port="$2" family="$3"
+  local -a timeout_args=()
+  timeout --foreground 1 true >/dev/null 2>&1 && timeout_args+=(--foreground)
+  LC_ALL=C timeout "${timeout_args[@]}" 15 \
+    iperf3 "$family" -c "$peer" -p "$port" -n 1M -P 1 >/dev/null 2>&1
+}
+
 fc_fit_find_working_port() {
   local peer="$1" family="$2" first candidate
   first="$(fc_fit_probe_peer_port "$peer" || true)"
   [[ -n "$first" ]] || return 1
   while IFS= read -r candidate; do
-    if fc_fit_run_iperf "$peer" "$candidate" 3 1 "$family" >/dev/null 2>&1; then
+    if fc_fit_probe_iperf "$peer" "$candidate" "$family"; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -81,6 +89,7 @@ fc_fit_find_working_port() {
 
 fc_fit_auto_peer() {
   local family="$1" temp_dir sorted='' candidate name provider rtt port file
+  local excluded="${2:-}"
   local running=0 index=0 concurrency="$FC_FIT_PING_CONCURRENCY"
   local ideal="$FC_FIT_PEER_IDEAL_RTT" maximum="$FC_FIT_PEER_MAX_RTT"
   fc_has ping || {
@@ -119,6 +128,7 @@ fc_fit_auto_peer() {
   }
   while IFS='|' read -r rtt candidate name provider; do
     [[ -n "$candidate" ]] || continue
+    [[ "$excluded" == *"|${candidate}|"* ]] && continue
     if ((rtt > maximum)); then
       printf '[SKIP] %s (%s/%s) RTT %sms，超过 %sms 上限。\n' "$candidate" "$name" "$provider" "$rtt" "$maximum" >&2
       continue
@@ -167,20 +177,42 @@ fc_fit_loss_pct() {
   }'
 }
 
-fc_fit_scan_bounds() {
-  local goodput="$1" loss="$2" cap="$3"
-  awk -v goodput="$goodput" -v loss="$loss" -v cap="$cap" 'BEGIN {
-    low=int(goodput*0.95)
-    if (low<1) low=1
-    factor=1.25+(loss/100)*2
-    if (factor>2.5) factor=2.5
-    high=int(goodput*factor)
-    if (high>cap) high=cap
-    if (high<=low) high=low+2
-    step=int((high-low)/10+0.5)
-    if (step<1) step=1
-    printf "%d %d %d\n", low, high, step
-  }'
+fc_fit_default_ceiling() {
+  local nominal="$1" ceiling
+  ceiling=$((nominal * 125 / 100))
+  ((ceiling > nominal)) || ceiling="$nominal"
+  printf '%s\n' "$ceiling"
+}
+
+fc_fit_health_rate() {
+  local nominal="$1" rate
+  rate=$((nominal * 20 / 100))
+  ((rate >= 1)) || rate=1
+  ((rate <= 200)) || rate=200
+  printf '%s\n' "$rate"
+}
+
+fc_fit_coarse_points() {
+  local nominal="$1" ceiling="$2" discover="$3" percent rate last=0 next
+  local -a percentages=(50 70 85 100 110 125)
+  for percent in "${percentages[@]}"; do
+    rate=$((nominal * percent / 100))
+    ((rate >= 1)) || rate=1
+    ((rate <= ceiling)) || rate="$ceiling"
+    if ((rate > last)); then
+      printf '%s\n' "$rate"
+      last="$rate"
+    fi
+    ((last < ceiling)) || return 0
+  done
+  ((discover == 1)) || return 0
+  while ((last < ceiling)); do
+    next=$((last * 3 / 2))
+    ((next > last)) || next=$((last + 1))
+    ((next <= ceiling)) || next="$ceiling"
+    printf '%s\n' "$next"
+    last="$next"
+  done
 }
 
 fc_fit_is_spike() {
@@ -261,12 +293,51 @@ FC_FIT_BROKE_AT=''
 FC_FIT_BASE_LOSS=''
 FC_FIT_SLOW_HITS=0
 FC_FIT_PEER_SLOW=0
+FC_FIT_HEALTH_STATUS=''
+FC_FIT_HEALTH_RATE=''
+FC_FIT_HEALTH_GOODPUT=''
+FC_FIT_HEALTH_LOSS=''
+
+fc_fit_validate_path() {
+  local iface="$1" peer="$2" port="$3" family="$4" duration="$5" nominal="$6" mem="$7"
+  local result sender retransmits
+  FC_FIT_HEALTH_RATE="$(fc_fit_health_rate "$nominal")"
+  FC_FIT_HEALTH_STATUS='measurement-failed'
+  FC_FIT_HEALTH_GOODPUT=''
+  FC_FIT_HEALTH_LOSS=''
+  if ! fc_fit_apply_test_rate "$iface" "$FC_FIT_HEALTH_RATE" "$mem"; then
+    FC_FIT_HEALTH_STATUS='shaper-failed'
+    return 1
+  fi
+  result="$(fc_fit_measure "$peer" "$port" "$duration" 1 "$family" || true)"
+  [[ -n "$result" ]] || return 1
+  sender="$(awk '{print $1}' <<<"$result")"
+  retransmits="$(awk '{print $2}' <<<"$result")"
+  FC_FIT_HEALTH_GOODPUT="$(fc_fit_goodput "$result")"
+  FC_FIT_HEALTH_LOSS="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
+  if awk -v loss="$FC_FIT_HEALTH_LOSS" 'BEGIN {exit !(loss>0.05)}'; then
+    FC_FIT_HEALTH_STATUS='dirty-path'
+    return 1
+  fi
+  if awk -v goodput="$FC_FIT_HEALTH_GOODPUT" -v rate="$FC_FIT_HEALTH_RATE" \
+    'BEGIN {exit !(goodput<rate*0.7)}'; then
+    FC_FIT_HEALTH_STATUS='peer-too-slow'
+    return 1
+  fi
+  FC_FIT_HEALTH_STATUS=clean
+  FC_FIT_BASE_LOSS="$FC_FIT_HEALTH_LOSS"
+  return 0
+}
 
 fc_fit_scan_range() {
   local iface="$1" peer="$2" port="$3" family="$4" duration="$5" gap="$6" threshold="$7"
-  local low="$8" high="$9" step="${10}" mem="${11}"
+  local low="$8" high="$9" step="${10}" mem="${11}" ceiling="${12}"
   local rate result sender retransmits goodput loss hits recheck clean_result
   local -a points=()
+  if ((low < 1 || high < low || high > ceiling)); then
+    fc_warn "拒绝越过测试上限：范围 ${low}-${high} Mbps / ceiling ${ceiling} Mbps。"
+    return 1
+  fi
   for ((rate = low; rate <= high; rate += step)); do points+=("$rate"); done
   [[ "${points[$((${#points[@]} - 1))]}" == "$high" ]] || points+=("$high")
   for rate in "${points[@]}"; do
@@ -322,6 +393,8 @@ fc_fit_scan_range() {
         FC_FIT_PEER_SLOW=1
         return 0
       fi
+      sleep "$gap"
+      continue
     else
       FC_FIT_SLOW_HITS=0
       printf '  %-10s %12s %9s %8s  ok\n' "$rate" "$goodput" "$retransmits" "$loss"
@@ -371,10 +444,6 @@ fc_fit_apply_result() {
         PER_FLOW_MBPS="$recommendation"
       fi
       ;;
-    no-knee)
-      TOTAL_MBPS=0
-      [[ "$ROLE" == general || "$ROLE" == landing ]] && SHAPER_MODE=fq
-      ;;
     *) return 0 ;;
   esac
   fc_save_config
@@ -390,9 +459,9 @@ fc_fit_restore_managed_qdisc() {
 }
 
 fc_fit_command() {
-  local peer='' nominal='' port=5201 family=-4 duration=12 gap=3 cap=2500 threshold=0.1
-  local apply=0 lift_per_flow=0 port_explicit=0 peer_auto=0 argument
-  local selected_peer='' peer_rtt='' peer_name='' peer_provider=''
+  local peer='' nominal='' port=5201 family=-4 duration=12 gap=3 ceiling='' threshold=0.1
+  local apply=0 lift_per_flow=0 port_explicit=0 peer_auto=0 discover=0 ceiling_explicit=0
+  local legacy_cap=0 argument selected_peer='' peer_rtt='' peer_name='' peer_provider=''
   while (($#)); do
     argument="$1"
     case "$argument" in
@@ -422,9 +491,18 @@ fc_fit_command() {
         gap="$2"
         shift 2
         ;;
+      --ceiling)
+        [[ $# -ge 2 ]] || fc_die '--ceiling 缺少值'
+        ceiling="$2"
+        ceiling_explicit=1
+        shift 2
+        ;;
       --cap)
         [[ $# -ge 2 ]] || fc_die '--cap 缺少值'
-        cap="$2"
+        ceiling="$2"
+        ceiling_explicit=1
+        discover=1
+        legacy_cap=1
         shift 2
         ;;
       --loss-threshold)
@@ -438,6 +516,10 @@ fc_fit_command() {
         ;;
       --apply)
         apply=1
+        shift
+        ;;
+      --discover)
+        discover=1
         shift
         ;;
       --lift-per-flow)
@@ -454,7 +536,17 @@ fc_fit_command() {
   fc_is_uint "$port" && ((port >= 1 && port <= 65535)) || fc_die '--port 必须是 1-65535 的整数。'
   fc_is_uint "$duration" && ((duration >= 1 && duration <= 600)) || fc_die '--duration 必须是 1-600 秒。'
   fc_is_uint "$gap" && ((gap <= 60)) || fc_die '--gap 必须是 0-60 秒。'
-  fc_is_uint "$cap" && ((cap >= 100 && cap <= 100000)) || fc_die '--cap 必须是 100-100000 Mbps。'
+  if ((discover == 1)); then
+    ((ceiling_explicit == 1)) || fc_die '--discover 必须同时指定 --ceiling MBPS。'
+  else
+    ((ceiling_explicit == 0)) || fc_die '--ceiling 必须与 --discover 一起使用。'
+    ceiling="$(fc_fit_default_ceiling "$nominal")"
+  fi
+  fc_is_uint "$ceiling" && ((ceiling >= nominal && ceiling <= 100000)) ||
+    fc_die '--ceiling 必须是不小于 nominal 且不超过 100000 的整数 Mbps。'
+  if [[ -z "$peer" ]] && ((ceiling > 2500)); then
+    fc_die '公共节点模式最多测试到 2500 Mbps；更高速率请使用 --peer 指定独享对端。'
+  fi
   [[ "$threshold" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
     awk -v value="$threshold" 'BEGIN {exit !(value>0 && value<=10)}' ||
     fc_die '--loss-threshold 必须大于 0 且不超过 10%。'
@@ -465,157 +557,122 @@ fc_fit_command() {
   fc_assert_no_conflicts
   fc_has iperf3 || fc_die 'fit 需要 iperf3；请先通过系统包管理器安装。'
   fc_has timeout && fc_has tc || fc_die 'fit 需要 timeout 和 tc。'
+  ((legacy_cap == 0)) || fc_warn '--cap 已兼容映射为 --discover --ceiling；后续请使用新参数。'
   fc_load_config
   [[ "$(fc_read_stage_value STAGE)" == complete ]] || fc_die 'Flowcraft 安装尚未完成；请先运行 ftcp resume。'
-  if [[ -z "$peer" ]]; then
-    selected_peer="$(fc_fit_auto_peer "$family" || true)"
-    [[ -n "$selected_peer" ]] || fc_die '自动选择测速对端失败；请稍后重试或使用 --peer 指定。'
-    IFS='|' read -r peer port peer_rtt peer_name peer_provider <<<"$selected_peer"
-    [[ "$peer" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || fc_die '自动选择返回了无效 peer。'
-    fc_is_uint "$port" && ((port >= 1 && port <= 65535)) || fc_die '自动选择返回了无效端口。'
-    peer_auto=1
-    fc_info "已选择 ${peer}:${port}（${peer_name}/${peer_provider}，RTT ${peer_rtt}ms）。"
-  fi
-  local iface mem result sender retransmits goodput loss best_result best_goodput _sample aggregate
-  local bounds low high step status recommendation='' knee='' margin coarse_broke fine control attempts
-  local -a endpoint_fields=("PEER=$peer" "PEER_PORT=$port" "PEER_AUTO=$peer_auto")
-  if ((peer_auto == 1)); then
-    endpoint_fields+=("PEER_RTT_MS=$peer_rtt" "PEER_NAME=$peer_name" "PEER_PROVIDER=$peer_provider")
-  fi
+  [[ -n "$peer" ]] || peer_auto=1
+  local iface mem rate status recommendation='' knee='' margin coarse_broke fine fine_start fine_end
+  local peer_attempts=0 excluded='' health_error=''
+  local -a endpoint_fields=()
   iface="$(fc_resolve_iface)"
   mem="$(fc_mem_mb)"
   ((mem > 0)) || mem=1024
   ((FC_DRY_RUN == 1)) || rm -f "$FC_FIT_RESULT"
 
-  fc_info "开始端口拟合：${peer}:${port} / 标称 ${nominal} Mbps / ${family#-}"
   trap 'fc_fit_restore_managed_qdisc || true' EXIT
   trap 'fc_warn "fit 被中断，正在恢复 Flowcraft qdisc"; fc_fit_restore_managed_qdisc || true; exit 130' INT TERM HUP
-  fc_restore_fq "$iface" || fc_die '无法临时切换到 fq。'
-  result="$(fc_fit_measure "$peer" "$port" "$duration" 1 "$family" || true)"
-  [[ -n "$result" ]] || {
-    fc_fit_restore_managed_qdisc || true
-    fc_die '未整形基线测试失败，请检查对端、端口和防火墙。'
-  }
-  sender="$(awk '{print $1}' <<<"$result")"
-  retransmits="$(awk '{print $2}' <<<"$result")"
-  goodput="$(fc_fit_goodput "$result")"
-  loss="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
 
-  if ((nominal <= cap)) && awk -v goodput="$goodput" -v nominal="$nominal" 'BEGIN {exit !(goodput<nominal*0.7)}'; then
-    best_result="$result"
-    best_goodput="$goodput"
-    fc_info "单流仅达到标称值的 70% 以下，再取两次样本中的最高完整结果。"
-    for _sample in 2 3; do
-      sleep "$gap"
-      result="$(fc_fit_measure "$peer" "$port" "$duration" 1 "$family" || true)"
-      [[ -n "$result" ]] || continue
-      goodput="$(fc_fit_goodput "$result")"
-      if awk -v current="$goodput" -v best="$best_goodput" 'BEGIN {exit !(current>best)}'; then
-        best_result="$result"
-        best_goodput="$goodput"
-      fi
-    done
-    result="$best_result"
-    goodput="$best_goodput"
-    sender="$(awk '{print $1}' <<<"$result")"
-    retransmits="$(awk '{print $2}' <<<"$result")"
-    loss="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
-  fi
-
-  if ((nominal > cap)) && awk -v goodput="$goodput" -v cap="$cap" -v loss="$loss" -v threshold="$threshold" \
-    'BEGIN {exit !(goodput<=cap && loss>threshold)}'; then
-    fc_info '高带宽单流结果不确定，增加一次 8 流聚合确认。'
-    aggregate="$(fc_fit_measure "$peer" "$port" "$duration" 8 "$family" || true)"
-    if [[ -n "$aggregate" ]] && awk -v goodput="$(fc_fit_goodput "$aggregate")" -v cap="$cap" 'BEGIN {exit !(goodput>cap)}'; then
-      goodput="$(fc_fit_goodput "$aggregate")"
+  while true; do
+    if [[ -z "$peer" ]]; then
+      selected_peer="$(fc_fit_auto_peer "$family" "$excluded" || true)"
+      [[ -n "$selected_peer" ]] || fc_die '自动选择测速对端失败；请稍后重试或使用 --peer 指定。'
+      IFS='|' read -r peer port peer_rtt peer_name peer_provider <<<"$selected_peer"
+      [[ "$peer" =~ ^[a-zA-Z0-9_.:%-]+$ ]] || fc_die '自动选择返回了无效 peer。'
+      fc_is_uint "$port" && ((port >= 1 && port <= 65535)) || fc_die '自动选择返回了无效端口。'
+      fc_info "已选择 ${peer}:${port}（${peer_name}/${peer_provider}，RTT ${peer_rtt}ms）。"
     fi
-  fi
+    peer_attempts=$((peer_attempts + 1))
+    endpoint_fields=("PEER=$peer" "PEER_PORT=$port" "PEER_AUTO=$peer_auto")
+    if ((peer_auto == 1)); then
+      endpoint_fields+=("PEER_RTT_MS=$peer_rtt" "PEER_NAME=$peer_name" "PEER_PROVIDER=$peer_provider")
+    fi
+    fc_info "开始有界端口拟合：${peer}:${port} / 标称 ${nominal} Mbps / ceiling ${ceiling} Mbps / ${family#-}"
+    FC_FIT_BASE_LOSS=''
+    if ! fc_fit_validate_path "$iface" "$peer" "$port" "$family" "$duration" "$nominal" "$mem"; then
+      health_error="$FC_FIT_HEALTH_STATUS"
+      fc_warn "对端健康检查未通过：${health_error}（${FC_FIT_HEALTH_RATE} Mbps / goodput ${FC_FIT_HEALTH_GOODPUT:--} / loss ${FC_FIT_HEALTH_LOSS:--}%）。"
+      if [[ "$health_error" != shaper-failed ]] && ((peer_auto == 1 && peer_attempts < 3)); then
+        excluded+="|${peer}|"
+        peer=''
+        fc_warn '自动换下一个公共节点重新验证。'
+        continue
+      fi
+      fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
+      fc_fit_store_result "STATUS=$health_error" "HEALTH_RATE_MBPS=$FC_FIT_HEALTH_RATE" \
+        "HEALTH_GOODPUT_MBPS=$FC_FIT_HEALTH_GOODPUT" "HEALTH_LOSS_PCT=$FC_FIT_HEALTH_LOSS" \
+        "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling"
+      fc_warn '路径或对端不适合拟合；未修改持久配置。'
+      return 0
+    fi
 
-  if awk -v goodput="$goodput" -v cap="$cap" 'BEGIN {exit !(goodput>cap)}'; then
-    status=above-cap
-    fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=above-cap' "UNSHAPED_MBPS=$goodput" "CAP_MBPS=$cap" \
-      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
-    fc_warn "未整形吞吐 ${goodput} Mbps 超过扫描上限 ${cap} Mbps；未修改持久配置。"
-    return 0
-  fi
-  if awk -v loss="$loss" -v threshold="$threshold" 'BEGIN {exit !(loss<=threshold)}'; then
-    status=no-knee
-    fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=no-knee' "UNSHAPED_MBPS=$goodput" "LOSS_PCT=$loss" \
-      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
-    fc_info "未整形丢包 ${loss}%，未发现 policer。"
-    ((apply == 0)) || fc_fit_apply_result "$status" '' "$lift_per_flow"
-    return 0
-  fi
+    printf '  %-10s %12s %9s %8s  %s\n' Rate Goodput Retrans Loss% Verdict
+    printf '  %-10s %12s %9s %8s  %s\n' "$FC_FIT_HEALTH_RATE" "$FC_FIT_HEALTH_GOODPUT" - "$FC_FIT_HEALTH_LOSS" health
+    FC_FIT_LAST_OK="$FC_FIT_HEALTH_RATE"
+    FC_FIT_BROKE_AT=''
+    FC_FIT_SLOW_HITS=0
+    FC_FIT_PEER_SLOW=0
+    while IFS= read -r rate; do
+      [[ "$rate" == "$FC_FIT_HEALTH_RATE" ]] && continue
+      fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" \
+        "$rate" "$rate" 1 "$mem" "$ceiling" || {
+        fc_fit_restore_managed_qdisc || true
+        fc_die '扫描期间无法应用有界测试 qdisc。'
+      }
+      [[ -z "$FC_FIT_BROKE_AT" ]] || break
+      ((FC_FIT_PEER_SLOW == 0)) || break
+    done < <(fc_fit_coarse_points "$nominal" "$ceiling" "$discover")
+    if ((FC_FIT_PEER_SLOW == 1 && peer_auto == 1 && peer_attempts < 3)); then
+      excluded+="|${peer}|"
+      peer=''
+      fc_warn '当前公共节点在高档位连续达不到目标，自动换节点重新扫描。'
+      continue
+    fi
+    break
+  done
 
-  bounds="$(fc_fit_scan_bounds "$goodput" "$loss" "$cap")"
-  IFS=' ' read -r low high step <<<"$bounds"
-  fc_info "检测到 policer 迹象：未整形 ${goodput} Mbps / 丢包 ${loss}%；扫描 ${low}-${high} Mbps。"
-  sleep 15
-  printf '  %-10s %12s %9s %8s  %s\n' Rate Goodput Retrans Loss% Verdict
-  FC_FIT_LAST_OK=''
-  FC_FIT_BROKE_AT=''
-  FC_FIT_BASE_LOSS=''
-  FC_FIT_SLOW_HITS=0
-  FC_FIT_PEER_SLOW=0
-  fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" "$low" "$high" "$step" "$mem" || {
-    fc_fit_restore_managed_qdisc || true
-    fc_die '扫描期间无法应用测试 qdisc。'
-  }
   if ((FC_FIT_PEER_SLOW == 1)); then
-    fc_fit_restore_managed_qdisc || true
-    fc_die '测速对端连续三档达不到目标速率，结果无效。'
-  fi
-
-  if [[ -z "$FC_FIT_LAST_OK" && -n "$FC_FIT_BROKE_AT" ]]; then
-    coarse_broke="$FC_FIT_BROKE_AT"
-    control="$coarse_broke"
-    attempts=0
-    while ((attempts < 3)) && [[ -z "$FC_FIT_LAST_OK" ]]; do
-      attempts=$((attempts + 1))
-      control=$((control * 3 / 4))
-      ((control >= 1)) || control=1
-      FC_FIT_BROKE_AT=''
-      FC_FIT_BASE_LOSS=''
-      fc_info "首档已经丢包，向下检查 ${control} Mbps 控制点。"
-      fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" "$control" "$control" 1 "$mem"
-    done
-    [[ -n "$FC_FIT_LAST_OK" ]] && FC_FIT_BROKE_AT="$coarse_broke"
-  fi
-  [[ -n "$FC_FIT_LAST_OK" ]] || {
-    fc_fit_restore_managed_qdisc || true
-    fc_die '没有测到可用的干净档位；未修改持久配置。'
-  }
-  if [[ -z "$FC_FIT_BROKE_AT" ]]; then
-    status=out-of-range
+    status='peer-too-slow'
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
-    fc_fit_store_result 'STATUS=out-of-range' "SCANNED_TO_MBPS=$high" "UNSHAPED_LOSS_PCT=$loss" \
-      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal"
-    fc_warn "扫描到 ${high} Mbps 仍未定位拐点；未修改持久配置。"
+    fc_fit_store_result "STATUS=$status" "SCANNED_TO_MBPS=$FC_FIT_LAST_OK" \
+      "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling"
+    fc_warn '测速对端连续三档达不到目标速率；未修改持久配置。'
+    return 0
+  fi
+  if [[ -z "$FC_FIT_BROKE_AT" ]]; then
+    status='clean-through-envelope'
+    fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
+    fc_fit_store_result "STATUS=$status" "SCANNED_TO_MBPS=$FC_FIT_LAST_OK" \
+      "HEALTH_LOSS_PCT=$FC_FIT_HEALTH_LOSS" "${endpoint_fields[@]}" \
+      "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling" "DISCOVER=$discover"
+    fc_log "测试到 ${FC_FIT_LAST_OK} Mbps 仍保持干净，真实拐点高于本次测试范围。"
+    ((apply == 0)) || fc_warn '没有找到可信拐点，因此忽略 --apply 并保留现有配置。'
     return 0
   fi
 
   coarse_broke="$FC_FIT_BROKE_AT"
-  if ((coarse_broke - FC_FIT_LAST_OK > 1)); then
-    fine=$((step / 4))
-    ((fine >= 1)) || fine=1
-    if ((FC_FIT_LAST_OK + fine <= coarse_broke - fine)); then
-      fc_info "拐点位于 ${FC_FIT_LAST_OK}-${coarse_broke} Mbps，以 ${fine} Mbps 步长细扫。"
-      FC_FIT_BROKE_AT=''
-      fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" \
-        "$((FC_FIT_LAST_OK + fine))" "$((coarse_broke - fine))" "$fine" "$mem"
-      [[ -n "$FC_FIT_BROKE_AT" ]] || FC_FIT_BROKE_AT="$coarse_broke"
-    fi
+  fine=$((nominal * 2 / 100))
+  ((fine >= 1)) || fine=1
+  fine_start=$((FC_FIT_LAST_OK + fine))
+  fine_end=$((coarse_broke - fine))
+  if ((fine_start <= fine_end)); then
+    fc_info "拐点位于 ${FC_FIT_LAST_OK}-${coarse_broke} Mbps，以 ${fine} Mbps 步长细扫。"
+    FC_FIT_BROKE_AT=''
+    fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" \
+      "$fine_start" "$fine_end" "$fine" "$mem" "$ceiling" || {
+      fc_fit_restore_managed_qdisc || true
+      fc_die '细扫期间无法应用有界测试 qdisc。'
+    }
+    [[ -n "$FC_FIT_BROKE_AT" ]] || FC_FIT_BROKE_AT="$coarse_broke"
   fi
   knee="$FC_FIT_LAST_OK"
-  margin="$(fc_fit_margin "$nominal")"
+  margin="$(fc_fit_margin "$knee")"
   recommendation=$((knee - margin))
   ((recommendation >= 1)) || recommendation="$knee"
   status=fitted
   fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
   fc_fit_store_result 'STATUS=fitted' "KNEE_MBPS=$knee" "MARGIN_MBPS=$margin" "RECOMMEND_MBPS=$recommendation" \
-    "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "LOSS_THRESHOLD_PCT=$threshold"
+    "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling" \
+    "DISCOVER=$discover" "LOSS_THRESHOLD_PCT=$threshold"
   fc_log "实测干净上限 ${knee} Mbps，安全余量 ${margin} Mbps，建议整形 ${recommendation} Mbps。"
   if ((apply == 1)); then
     fc_fit_apply_result "$status" "$recommendation" "$lift_per_flow"

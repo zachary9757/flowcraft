@@ -641,7 +641,7 @@ fc_menu_operations() {
 fc_menu_fit() {
   fc_menu_require_config || return 1
   fc_load_config
-  local peer nominal answer
+  local peer nominal answer ceiling
   printf '可指定靠近本机、带宽高于本机端口的 iperf3 服务端。\n'
   printf '直接回车会从公共节点中按 RTT 和实际可用端口自动选择。\n'
   read -r -p '对端 IP / 域名 [自动]: ' peer
@@ -649,9 +649,25 @@ fc_menu_fit() {
   ((nominal > 0)) || nominal="$PER_FLOW_MBPS"
   read -r -p "标称端口带宽 Mbps [$nominal]: " answer
   nominal="${answer:-$nominal}"
-  read -r -p '测量完成后自动应用推荐值？[y/N]: ' answer
+  fc_is_uint "$nominal" || {
+    fc_warn '标称端口带宽必须是整数 Mbps。'
+    return 1
+  }
   local -a args=(--nominal "$nominal")
   [[ -z "$peer" ]] || args+=(--peer "$peer")
+  printf '默认只在标称值的 20%%-125%% 内有界测试，不会不限速探测。\n'
+  read -r -p '进入高级发现模式并继续向上扩展？[y/N]: ' answer
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    ceiling=$((nominal * 2))
+    read -r -p "最高测试速率 Mbps [$ceiling]: " answer
+    ceiling="${answer:-$ceiling}"
+    if [[ -z "$peer" ]] && fc_is_uint "$ceiling" && ((ceiling > 2500)); then
+      fc_warn '公共节点最多测试到 2500 Mbps；更高速率必须指定独享对端。'
+      return 1
+    fi
+    args+=(--discover --ceiling "$ceiling")
+  fi
+  read -r -p '找到可信拐点后自动应用推荐值？[y/N]: ' answer
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     args+=(--apply)
     if [[ "$ROLE" == relay ]]; then
@@ -734,7 +750,8 @@ Flowcraft - BBRv3、TCP 调优、监控与出口整形
   ftcp qdisc fq|fq_codel|fq_pie|cake
   ftcp security audit            只读内核风险面审计
   ftcp fit [--peer HOST [--port PORT]] --nominal MBPS [--apply] [--lift-per-flow]
-                                      实测端口 policer 拐点并可写回 Flowcraft
+  ftcp fit --peer HOST --nominal MBPS --discover --ceiling MBPS [--apply]
+                                      有界实测端口 policer 拐点
   ftcp experimental max-throughput --yes
   ftcp rollback                  恢复安装前网络状态
   ftcp uninstall                 回滚并卸载程序

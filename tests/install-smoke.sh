@@ -67,7 +67,7 @@ MOCK
 chmod +x "$mock_bin"/*
 
 export PATH="$mock_bin:$PATH"
-export FLOWCRAFT_VERSION=0.3.1
+export FLOWCRAFT_VERSION=0.4.0
 export FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
 export FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft"
 export FLOWCRAFT_STATE_DIR="$TASK_TMP/state"
@@ -106,7 +106,7 @@ test ! -e "$FLOWCRAFT_LEGACY_INSTALL_FILE"
 test ! -e "$FLOWCRAFT_LEGACY_COMMAND_FILE"
 test ! -e "$FLOWCRAFT_STATE_DIR/benchmark-result"
 test -r "$FLOWCRAFT_INSTALL_LIB_DIR/fit.sh"
-"$FLOWCRAFT_INSTALL_FILE" version | grep -q '^ftcp 0.3.1$'
+"$FLOWCRAFT_INSTALL_FILE" version | grep -q '^ftcp 0.4.0$'
 test ! -e "$FLOWCRAFT_CONFIG_FILE"
 printf 'PASS: one-line bootstrap installs program without changing network state\n'
 
