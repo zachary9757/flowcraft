@@ -667,7 +667,7 @@ fc_menu_fit() {
     fi
     args+=(--discover --ceiling "$ceiling")
   fi
-  read -r -p '找到可信拐点后自动应用推荐值？[y/N]: ' answer
+  read -r -p '找到可信拐点（丢包或吞吐效率拐点）后自动应用推荐值？[y/N]: ' answer
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     args+=(--apply)
     if [[ "$ROLE" == relay ]]; then

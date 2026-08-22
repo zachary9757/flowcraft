@@ -2,7 +2,7 @@
 
 Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内核、TCP 参数、出口整形、状态诊断和可恢复回滚收敛到一个配置所有者中。它用于替代同时安装多套会互相覆盖 `sysctl` 与 root qdisc 的脚本。
 
-> 当前版本：`0.4.0`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
+> 当前版本：`0.4.1`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
 
 ## 能力
 
@@ -129,7 +129,9 @@ sudo ftcp fit --peer 192.0.2.10 --nominal 850 --discover --ceiling 6000
 
 普通模式不再进行不限速基线测试。它先在标称值 20%（最高 200 Mbps）执行路径健康检查，再按 50%、70%、85%、100%、110%、125% 有界递增；任何档位都不得超过本次 ceiling。850 Mbps 标称值默认只会测试到 1062 Mbps。如果范围内全部干净，结果为 `clean-through-envelope`，即使提供 `--apply` 也保留原有配置。
 
-只有 `fitted`（已经通过 2/3 复测找到可信拐点）允许自动应用。`dirty-path`、`peer-too-slow`、`measurement-failed`、`shaper-failed` 和 `clean-through-envelope` 都只记录结果。安全余量根据实测干净上限计算，而不是根据输入的标称值计算。
+拐点采用双信号判定：重传率超过动态阈值，或者当前吞吐效率降到低速健康基线的 90% 以下、同时新增测试速率的边际吞吐收益低于 50%。任一信号都必须在同一档位通过 2/3 复测确认，随后才进入 2% 标称带宽步长的细扫。这样既能识别 policer 丢包拐点，也能识别无明显丢包但吞吐曲线已经变平的容量拐点。
+
+只有 `fitted`（已经通过 2/3 复测找到可信拐点）允许自动应用。`dirty-path`、`peer-too-slow`、`measurement-failed`、`shaper-failed` 和 `clean-through-envelope` 都只记录结果。安全余量根据实测干净上限计算，而不是根据输入的标称值计算；结果同时记录 `BREAK_REASON` 和最后一个干净档位的实际吞吐。
 
 需要继续寻找高于 125% 标称值的真实极限时，必须显式使用 `--discover --ceiling`。公共节点最高允许 2500 Mbps；更高速率必须用 `--peer` 指定近端独享服务器。旧 `--cap N` 暂时兼容为 `--discover --ceiling N`，运行时会显示迁移提示。
 

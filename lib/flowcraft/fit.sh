@@ -225,6 +225,21 @@ fc_fit_is_spike() {
   }'
 }
 
+fc_fit_is_efficiency_knee() {
+  local goodput="$1" rate="$2" previous_goodput="$3" previous_rate="$4"
+  local health_goodput="$5" health_rate="$6"
+  [[ -n "$goodput" && -n "$previous_goodput" && -n "$health_goodput" ]] || return 1
+  awk -v goodput="$goodput" -v rate="$rate" \
+    -v previous_goodput="$previous_goodput" -v previous_rate="$previous_rate" \
+    -v health_goodput="$health_goodput" -v health_rate="$health_rate" 'BEGIN {
+    if (rate<=previous_rate || health_rate<=0 || rate<=0) exit 1
+    efficiency=goodput/rate
+    health_efficiency=health_goodput/health_rate
+    marginal_gain=(goodput-previous_goodput)/(rate-previous_rate)
+    exit !(efficiency<health_efficiency*0.90 && marginal_gain<0.50)
+  }'
+}
+
 fc_fit_goodput() {
   local result="$1" value
   value="$(awk '{print $3}' <<<"$result")"
@@ -289,7 +304,9 @@ fc_fit_apply_test_rate() {
 }
 
 FC_FIT_LAST_OK=''
+FC_FIT_LAST_GOODPUT=''
 FC_FIT_BROKE_AT=''
+FC_FIT_BREAK_REASON=''
 FC_FIT_BASE_LOSS=''
 FC_FIT_SLOW_HITS=0
 FC_FIT_PEER_SLOW=0
@@ -376,6 +393,40 @@ fc_fit_scan_range() {
       if ((hits >= 2)); then
         printf '  %-10s %12s %9s %8s  loss spike (%s/3)\n' "$rate" "$goodput" "$retransmits" "$loss" "$hits"
         FC_FIT_BROKE_AT="$rate"
+        FC_FIT_BREAK_REASON='loss-spike'
+        return 0
+      fi
+      [[ -n "$clean_result" ]] || continue
+      result="$clean_result"
+      sender="$(awk '{print $1}' <<<"$result")"
+      retransmits="$(awk '{print $2}' <<<"$result")"
+      goodput="$(fc_fit_goodput "$result")"
+      loss="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
+    fi
+    if fc_fit_is_efficiency_knee "$goodput" "$rate" "$FC_FIT_LAST_GOODPUT" "$FC_FIT_LAST_OK" \
+      "$FC_FIT_HEALTH_GOODPUT" "$FC_FIT_HEALTH_RATE"; then
+      hits=1
+      clean_result=''
+      for recheck in 2 3; do
+        sleep "$gap"
+        result="$(fc_fit_measure "$peer" "$port" "$duration" 1 "$family" || true)"
+        [[ -n "$result" ]] || continue
+        sender="$(awk '{print $1}' <<<"$result")"
+        retransmits="$(awk '{print $2}' <<<"$result")"
+        goodput="$(fc_fit_goodput "$result")"
+        loss="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
+        printf '  %-10s %12s %9s %8s  %s\n' "${rate} (#${recheck})" "$goodput" "$retransmits" "$loss" recheck
+        if fc_fit_is_efficiency_knee "$goodput" "$rate" "$FC_FIT_LAST_GOODPUT" "$FC_FIT_LAST_OK" \
+          "$FC_FIT_HEALTH_GOODPUT" "$FC_FIT_HEALTH_RATE"; then
+          hits=$((hits + 1))
+        else
+          clean_result="$result"
+        fi
+      done
+      if ((hits >= 2)); then
+        printf '  %-10s %12s %9s %8s  efficiency knee (%s/3)\n' "$rate" "$goodput" "$retransmits" "$loss" "$hits"
+        FC_FIT_BROKE_AT="$rate"
+        FC_FIT_BREAK_REASON='efficiency-drop'
         return 0
       fi
       [[ -n "$clean_result" ]] || continue
@@ -400,6 +451,7 @@ fc_fit_scan_range() {
       printf '  %-10s %12s %9s %8s  ok\n' "$rate" "$goodput" "$retransmits" "$loss"
     fi
     FC_FIT_LAST_OK="$rate"
+    FC_FIT_LAST_GOODPUT="$goodput"
     sleep "$gap"
   done
 }
@@ -561,7 +613,7 @@ fc_fit_command() {
   fc_load_config
   [[ "$(fc_read_stage_value STAGE)" == complete ]] || fc_die 'Flowcraft 安装尚未完成；请先运行 ftcp resume。'
   [[ -n "$peer" ]] || peer_auto=1
-  local iface mem rate status recommendation='' knee='' margin coarse_broke fine fine_start fine_end
+  local iface mem rate status recommendation='' knee='' margin coarse_broke coarse_reason fine fine_start fine_end
   local peer_attempts=0 excluded='' health_error=''
   local -a endpoint_fields=()
   iface="$(fc_resolve_iface)"
@@ -608,7 +660,9 @@ fc_fit_command() {
     printf '  %-10s %12s %9s %8s  %s\n' Rate Goodput Retrans Loss% Verdict
     printf '  %-10s %12s %9s %8s  %s\n' "$FC_FIT_HEALTH_RATE" "$FC_FIT_HEALTH_GOODPUT" - "$FC_FIT_HEALTH_LOSS" health
     FC_FIT_LAST_OK="$FC_FIT_HEALTH_RATE"
+    FC_FIT_LAST_GOODPUT="$FC_FIT_HEALTH_GOODPUT"
     FC_FIT_BROKE_AT=''
+    FC_FIT_BREAK_REASON=''
     FC_FIT_SLOW_HITS=0
     FC_FIT_PEER_SLOW=0
     while IFS= read -r rate; do
@@ -634,6 +688,7 @@ fc_fit_command() {
     status='peer-too-slow'
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
     fc_fit_store_result "STATUS=$status" "SCANNED_TO_MBPS=$FC_FIT_LAST_OK" \
+      "LAST_GOODPUT_MBPS=$FC_FIT_LAST_GOODPUT" \
       "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling"
     fc_warn '测速对端连续三档达不到目标速率；未修改持久配置。'
     return 0
@@ -642,7 +697,7 @@ fc_fit_command() {
     status='clean-through-envelope'
     fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
     fc_fit_store_result "STATUS=$status" "SCANNED_TO_MBPS=$FC_FIT_LAST_OK" \
-      "HEALTH_LOSS_PCT=$FC_FIT_HEALTH_LOSS" "${endpoint_fields[@]}" \
+      "LAST_GOODPUT_MBPS=$FC_FIT_LAST_GOODPUT" "HEALTH_LOSS_PCT=$FC_FIT_HEALTH_LOSS" "${endpoint_fields[@]}" \
       "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling" "DISCOVER=$discover"
     fc_log "测试到 ${FC_FIT_LAST_OK} Mbps 仍保持干净，真实拐点高于本次测试范围。"
     ((apply == 0)) || fc_warn '没有找到可信拐点，因此忽略 --apply 并保留现有配置。'
@@ -650,6 +705,7 @@ fc_fit_command() {
   fi
 
   coarse_broke="$FC_FIT_BROKE_AT"
+  coarse_reason="$FC_FIT_BREAK_REASON"
   fine=$((nominal * 2 / 100))
   ((fine >= 1)) || fine=1
   fine_start=$((FC_FIT_LAST_OK + fine))
@@ -657,12 +713,16 @@ fc_fit_command() {
   if ((fine_start <= fine_end)); then
     fc_info "拐点位于 ${FC_FIT_LAST_OK}-${coarse_broke} Mbps，以 ${fine} Mbps 步长细扫。"
     FC_FIT_BROKE_AT=''
+    FC_FIT_BREAK_REASON=''
     fc_fit_scan_range "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" \
       "$fine_start" "$fine_end" "$fine" "$mem" "$ceiling" || {
       fc_fit_restore_managed_qdisc || true
       fc_die '细扫期间无法应用有界测试 qdisc。'
     }
-    [[ -n "$FC_FIT_BROKE_AT" ]] || FC_FIT_BROKE_AT="$coarse_broke"
+    if [[ -z "$FC_FIT_BROKE_AT" ]]; then
+      FC_FIT_BROKE_AT="$coarse_broke"
+      FC_FIT_BREAK_REASON="$coarse_reason"
+    fi
   fi
   knee="$FC_FIT_LAST_OK"
   margin="$(fc_fit_margin "$knee")"
@@ -671,9 +731,10 @@ fc_fit_command() {
   status=fitted
   fc_fit_restore_managed_qdisc || fc_die '恢复出口 qdisc 失败。'
   fc_fit_store_result 'STATUS=fitted' "KNEE_MBPS=$knee" "MARGIN_MBPS=$margin" "RECOMMEND_MBPS=$recommendation" \
+    "BREAK_REASON=$FC_FIT_BREAK_REASON" "LAST_GOODPUT_MBPS=$FC_FIT_LAST_GOODPUT" \
     "${endpoint_fields[@]}" "NOMINAL_MBPS=$nominal" "CEILING_MBPS=$ceiling" \
     "DISCOVER=$discover" "LOSS_THRESHOLD_PCT=$threshold"
-  fc_log "实测干净上限 ${knee} Mbps，安全余量 ${margin} Mbps，建议整形 ${recommendation} Mbps。"
+  fc_log "实测干净上限 ${knee} Mbps，触发 ${FC_FIT_BREAK_REASON}，安全余量 ${margin} Mbps，建议整形 ${recommendation} Mbps。"
   if ((apply == 1)); then
     fc_fit_apply_result "$status" "$recommendation" "$lift_per_flow"
     fc_log '拟合结果已写入 Flowcraft 配置并应用。'

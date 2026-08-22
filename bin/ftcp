@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-FLOWCRAFT_VERSION="0.4.0"
+FLOWCRAFT_VERSION="0.4.1"
 
 resolve_lib_dir() {
   local source_dir
