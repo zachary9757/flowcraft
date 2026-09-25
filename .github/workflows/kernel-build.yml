@@ -153,6 +153,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
+          make_latest: false
           body: |
             Flowcraft BBRv3 kernel built from gregkh/linux stable ${{ env.KERNEL_VERSION }}.
             Profile: ${{ matrix.profile }}. Source and patch provenance are recorded in UPSTREAMS.lock.

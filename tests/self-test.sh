@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TASK_TMP="$(mktemp -d /tmp/flowcraft-tests.XXXXXX)"
 trap 'rm -rf "$TASK_TMP"' EXIT
 
-export FLOWCRAFT_VERSION=0.5.0
+export FLOWCRAFT_VERSION=0.5.1
 export FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
 export FLOWCRAFT_ETC_DIR="$TASK_TMP/etc/flowcraft"
 export FLOWCRAFT_STATE_DIR="$TASK_TMP/state"
@@ -288,7 +288,7 @@ usage_output="$(fc_usage)"
 check_true 'usage exposes the ftcp command' grep -q '^  ftcp fit ' <<<"$usage_output"
 check_false 'usage removes benchmark command' grep -q 'benchmark' <<<"$usage_output"
 check_false 'usage does not expose the old flowcraft command' grep -q '^  flowcraft' <<<"$usage_output"
-check_eq 'version uses the short command name' 'ftcp 0.5.0' "$(fc_main version)"
+check_eq 'version uses the short command name' 'ftcp 0.5.1' "$(fc_main version)"
 role_guide="$(fc_print_role_guide)"
 check_true 'role guide includes 500M reference' grep -q '500M 家宽.*430.*450' <<<"$role_guide"
 check_true 'role guide includes 1G and 2.5G references' grep -q '2.5G 端口.*2300' <<<"$role_guide"
@@ -426,7 +426,7 @@ empty_conflicts="$(fc_find_conflicts | sort -u)"
 check_eq 'empty conflict scan succeeds under pipefail' '' "$empty_conflicts"
 check_false 'complex pre-existing qdisc is refused before takeover' bash -c '
   set -Eeuo pipefail
-  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_VERSION=0.5.1 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
   source "$1/lib/flowcraft/core.sh"
   source "$1/lib/flowcraft/tuning.sh"
   FC_QDISC_SNAPSHOT="$2/complex-qdisc.snapshot"
@@ -439,7 +439,7 @@ printf 'ROLE=general\nIFACE=eth-test\nSHAPER_MODE=fq\nTOTAL_MBPS=0\n' >"$preflig
 cp "$preflight_config" "$preflight_copy"
 check_false 'qdisc command rejects an unrestorable root before saving config' bash -c '
   set -Eeuo pipefail
-  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_VERSION=0.5.1 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
   export FLOWCRAFT_CONFIG_FILE="$2/preflight-config.conf"
   export FLOWCRAFT_STATE_DIR="$2/preflight-state"
   source "$1/lib/flowcraft/core.sh"
@@ -452,7 +452,7 @@ check_true 'failed qdisc preflight leaves config unchanged' cmp -s "$preflight_c
 printf 'IFACE=old0\nKIND=fq\n' >"$TASK_TMP/other-iface.snapshot"
 check_false 'an existing qdisc snapshot cannot silently move to another interface' bash -c '
   set -Eeuo pipefail
-  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_VERSION=0.5.1 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
   source "$1/lib/flowcraft/core.sh"
   source "$1/lib/flowcraft/tuning.sh"
   FC_QDISC_SNAPSHOT="$2/other-iface.snapshot"
@@ -586,7 +586,7 @@ check_eq 'RPS applies to the selected interface' f "$(<"$rps_root/eth-test/queue
 check_eq 'RPS leaves unrelated interfaces unchanged' 0 "$(<"$rps_root/eth-other/queues/rx-0/rps_cpus")"
 check_false 'RPS cannot reuse another interface snapshot' bash -c '
   set -Eeuo pipefail
-  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_VERSION=0.5.1 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
   export FLOWCRAFT_STATE_DIR="$2/state" FLOWCRAFT_SYS_CLASS_NET="$2/rps-sys"
   source "$1/lib/flowcraft/core.sh"
   source "$1/lib/flowcraft/tuning.sh"
