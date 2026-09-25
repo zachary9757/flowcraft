@@ -255,6 +255,7 @@ fc_experimental_command() {
   ROLE=general
   SHAPER_MODE=fq
   TOTAL_MBPS=0
+  fc_preflight_apply
   fc_save_config
   fc_apply_all
 }
@@ -324,6 +325,7 @@ fc_install() {
     FC_INSTALL_YES=1
   fi
   fc_take_lock
+  fc_preflight_apply
   fc_install_program
   fc_save_config
   fc_write_service
@@ -360,19 +362,24 @@ fc_service_apply() {
 }
 
 fc_profile() {
-  local role="${1:-}" preserved_total fitted total_source=manual
+  local role="${1:-}" preserved_total fitted stored_fit fit_status total_source=manual
   fc_validate_config_value ROLE "$role" || fc_die "角色必须是 general、relay 或 landing。"
   fc_need_root
   fc_load_config
   preserved_total="$TOTAL_MBPS"
   fitted="$(fc_fit_recommendation || true)"
+  fit_status="$(fc_fit_effective_status)"
+  stored_fit="$(fc_fit_result_value RECOMMEND_MBPS || true)"
   if [[ -n "$fitted" ]]; then
     preserved_total="$fitted"
     total_source=fitted
+  elif [[ "$fit_status" == stale-fitted && "$preserved_total" == "$stored_fit" ]]; then
+    preserved_total=0
   fi
   ROLE="$role"
   fc_set_role_defaults
   fc_set_role_total "$preserved_total" "$total_source"
+  fc_preflight_apply
   fc_save_config
   fc_apply_all
 }
@@ -407,6 +414,7 @@ fc_qdisc_command() {
   [[ "$ROLE" == general ]] || fc_die "手动 qdisc 只允许用于 general 角色，避免覆盖限速树。"
   SHAPER_MODE="$mode"
   TOTAL_MBPS=0
+  fc_preflight_apply
   fc_save_config
   fc_apply_shape
 }
@@ -482,7 +490,7 @@ fc_menu_next_action() {
   else
     case "$fit_status" in
       '') printf '[8] 拟合物理总出口拐点' ;;
-      dirty-path | peer-too-slow | measurement-failed | shaper-failed)
+      dirty-path | peer-too-slow | measurement-failed | shaper-failed | verification-failed | stale-fitted)
         printf '[8] 更换或指定对端后重试，再用 [7] 复核'
         ;;
       fitted) printf '[7] 用 status / diagnose 复核实测配置' ;;
@@ -506,7 +514,7 @@ fc_menu_render() {
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   bbr="$(fc_bbr_version || true)"
   fit="$(fc_fit_summary)"
-  fit_status="$(fc_fit_result_value STATUS || true)"
+  fit_status="$(fc_fit_effective_status)"
   next_action="$(fc_menu_next_action "$configured_state" "$stage" "$fit_status")"
 
   printf '%b================================================================%b\n' "$FC_YELLOW" "$FC_RESET"
@@ -559,9 +567,15 @@ fc_menu_run() {
 fc_menu_role() {
   fc_menu_require_config || return 1
   fc_load_config
-  local answer previous_total fitted total_default total_source=manual
+  local answer previous_total fitted stored_fit fit_status total_default total_source=manual
   previous_total="$TOTAL_MBPS"
   fitted="$(fc_fit_recommendation || true)"
+  fit_status="$(fc_fit_effective_status)"
+  stored_fit="$(fc_fit_result_value RECOMMEND_MBPS || true)"
+  if [[ "$fit_status" == stale-fitted && "$previous_total" == "$stored_fit" ]]; then
+    previous_total=0
+    fc_warn '旧拟合结果已过期或出口已变化；本次默认不沿用该总出口值。'
+  fi
   fc_print_role_guide
   read -r -p "角色 [当前 $ROLE]: " answer
   case "$answer" in
@@ -604,6 +618,7 @@ fc_menu_role() {
   fc_validate_config_value RTT_MS "$RTT_MS" || fc_die "RTT 参数无效。"
   fc_validate_config_value ORIGIN_RTT_MS "$ORIGIN_RTT_MS" || fc_die "回源 RTT 参数无效。"
   fc_validate_config_value PER_FLOW_MBPS "$PER_FLOW_MBPS" || fc_die "单连接速率无效。"
+  fc_preflight_apply
   fc_save_config
   fc_apply_all
   fc_log "已切换到 ${ROLE} 角色。"
@@ -745,7 +760,7 @@ fc_menu_fit() {
     printf '自动公共模式固定最高 2500 Mbps；若链路更快，只确认能力超出范围并保留现有配置。\n'
   fi
   printf '将按 tcpfit sweep 逻辑先做不限速 fq 单流探测；仅在高丢包时动态扫描。\n'
-  printf '只有找到 2/3 可复现丢包拐点才会应用。\n'
+  printf '只有找到 2/3 可复现丢包拐点、且建议速率通过 2/3 落地复验才会应用。\n'
   read -r -p '找到可信丢包拐点后自动应用推荐值？[y/N]: ' answer
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     args+=(--apply)

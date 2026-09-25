@@ -46,6 +46,7 @@ FC_FIT_PROBE_PORTS="${FC_FIT_PROBE_PORTS:-5201 5202 5203 5200}"
 FC_FIT_PEER_IDEAL_RTT="${FC_FIT_PEER_IDEAL_RTT:-50}"
 FC_FIT_PEER_MAX_RTT="${FC_FIT_PEER_MAX_RTT:-100}"
 FC_FIT_PING_CONCURRENCY="${FC_FIT_PING_CONCURRENCY:-6}"
+FC_FIT_MAX_AGE_SECONDS="${FC_FIT_MAX_AGE_SECONDS:-2592000}"
 
 fc_fit_port_order() {
   local preferred="$1" candidate
@@ -168,22 +169,25 @@ fc_fit_auto_peer() {
 }
 
 fc_fit_margin() {
-  local bandwidth="$1"
+  local bandwidth="$1" fixed percent
   if ((bandwidth <= 30)); then
-    printf '1\n'
+    fixed=1
   elif ((bandwidth <= 60)); then
-    printf '2\n'
+    fixed=2
   elif ((bandwidth <= 100)); then
-    printf '5\n'
+    fixed=5
   elif ((bandwidth <= 300)); then
-    printf '10\n'
+    fixed=10
   elif ((bandwidth <= 600)); then
-    printf '15\n'
+    fixed=15
   elif ((bandwidth <= 1000)); then
-    printf '25\n'
+    fixed=25
   else
-    printf '40\n'
+    fixed=40
   fi
+  percent=$(((bandwidth * 3 + 99) / 100))
+  ((fixed >= percent)) || fixed="$percent"
+  printf '%s\n' "$fixed"
 }
 
 fc_fit_loss_pct() {
@@ -196,8 +200,12 @@ fc_fit_loss_pct() {
 }
 
 fc_fit_health_rate() {
-  local nominal="$1" rate
+  local nominal="$1" cap="${2:-}" rate cap_rate
   rate=$((nominal * 40 / 100))
+  if fc_is_uint "$cap"; then
+    cap_rate=$((cap * 40 / 100))
+    ((rate <= cap_rate)) || rate="$cap_rate"
+  fi
   ((rate >= 1)) || rate=1
   printf '%s\n' "$rate"
 }
@@ -323,9 +331,9 @@ FC_FIT_HEALTH_GOODPUT=''
 FC_FIT_HEALTH_LOSS=''
 
 fc_fit_validate_path() {
-  local iface="$1" peer="$2" port="$3" family="$4" nominal="$5" mem="$6"
+  local iface="$1" peer="$2" port="$3" family="$4" nominal="$5" mem="$6" cap="${7:-}"
   local result sender retransmits
-  FC_FIT_HEALTH_RATE="$(fc_fit_health_rate "$nominal")"
+  FC_FIT_HEALTH_RATE="$(fc_fit_health_rate "$nominal" "$cap")"
   FC_FIT_HEALTH_STATUS='measurement-failed'
   FC_FIT_HEALTH_GOODPUT=''
   FC_FIT_HEALTH_LOSS=''
@@ -438,9 +446,6 @@ fc_fit_scan_range() {
         FC_FIT_PEER_SLOW=1
         return 0
       fi
-      FC_FIT_LAST_OK="$rate"
-      FC_FIT_LAST_GOODPUT="$goodput"
-      previous_goodput="$goodput"
       sleep "$gap"
       continue
     else
@@ -456,6 +461,33 @@ fc_fit_scan_range() {
     previous_goodput="$goodput"
     sleep "$gap"
   done
+}
+
+fc_fit_verify_rate() {
+  local iface="$1" peer="$2" port="$3" family="$4" duration="$5" gap="$6" threshold="$7"
+  local rate="$8" mem="$9" parallel="${10:-1}"
+  local sample result sender retransmits goodput loss clean=0
+  fc_fit_apply_test_rate "$iface" "$rate" "$mem" || return 1
+  for sample in 1 2 3; do
+    result="$(fc_fit_measure "$peer" "$port" "$duration" "$parallel" "$family" || true)"
+    if [[ -z "$result" ]]; then
+      printf '  %-10s %12s %9s %8s  %s\n' "verify #${sample}" - - - failed
+    else
+      sender="$(awk '{print $1}' <<<"$result")"
+      retransmits="$(awk '{print $2}' <<<"$result")"
+      goodput="$(fc_fit_goodput "$result")"
+      loss="$(fc_fit_loss_pct "$retransmits" "$sender" "$duration")"
+      if ! fc_fit_is_spike "$loss" "${FC_FIT_BASE_LOSS:-0}" "$threshold" &&
+        awk -v goodput="$goodput" -v target="$rate" 'BEGIN {exit !(goodput>=target*0.9)}'; then
+        clean=$((clean + 1))
+        printf '  %-10s %12s %9s %8s  %s\n' "verify #${sample}" "$goodput" "$retransmits" "$loss" clean
+      else
+        printf '  %-10s %12s %9s %8s  %s\n' "verify #${sample}" "$goodput" "$retransmits" "$loss" rejected
+      fi
+    fi
+    ((sample == 3)) || sleep "$gap"
+  done
+  ((clean >= 2))
 }
 
 fc_fit_store_result() {
@@ -474,13 +506,49 @@ fc_fit_result_value() {
   awk -F= -v key="$key" '$1==key {print $2; found=1; exit} END {exit !found}' "$FC_FIT_RESULT"
 }
 
+fc_fit_route_checksum() {
+  local routes
+  if ! fc_has ip; then
+    printf 'unavailable\n'
+    return 0
+  fi
+  routes="$(ip -o route show default 2>/dev/null || true)"
+  printf '%s' "$routes" | LC_ALL=C cksum | awk '{print $1}'
+}
+
+fc_fit_current_iface() {
+  local iface="${IFACE:-auto}"
+  [[ "$iface" == auto ]] && iface="$(fc_detect_iface)"
+  printf '%s\n' "$iface"
+}
+
 fc_fit_recommendation() {
-  local status recommendation
+  local status recommendation measured_at fit_iface fit_route now current_iface current_route
   status="$(fc_fit_result_value STATUS || true)"
   [[ "$status" == fitted ]] || return 1
   recommendation="$(fc_fit_result_value RECOMMEND_MBPS || true)"
   fc_is_uint "$recommendation" && ((recommendation >= 1 && recommendation <= 100000)) || return 1
+  measured_at="$(fc_fit_result_value MEASURED_AT_EPOCH || true)"
+  fit_iface="$(fc_fit_result_value FIT_IFACE || true)"
+  fit_route="$(fc_fit_result_value FIT_ROUTE_CKSUM || true)"
+  fc_is_uint "$measured_at" && [[ -n "$fit_iface" && -n "$fit_route" ]] || return 1
+  fc_is_uint "$FC_FIT_MAX_AGE_SECONDS" && ((FC_FIT_MAX_AGE_SECONDS >= 1)) || return 1
+  now="$(date +%s)"
+  ((now >= measured_at && now - measured_at <= FC_FIT_MAX_AGE_SECONDS)) || return 1
+  current_iface="$(fc_fit_current_iface)"
+  current_route="$(fc_fit_route_checksum)"
+  [[ -n "$current_iface" && "$current_iface" == "$fit_iface" && "$current_route" == "$fit_route" ]] || return 1
   printf '%s\n' "$recommendation"
+}
+
+fc_fit_effective_status() {
+  local status
+  status="$(fc_fit_result_value STATUS || true)"
+  if [[ "$status" == fitted ]] && ! fc_fit_recommendation >/dev/null; then
+    printf 'stale-fitted\n'
+  else
+    printf '%s\n' "$status"
+  fi
 }
 
 fc_fit_summary() {
@@ -489,7 +557,7 @@ fc_fit_summary() {
     return 0
   }
   local status recommendation knee cap unshaped current_total current_per_flow
-  status="$(fc_fit_result_value STATUS || true)"
+  status="$(fc_fit_effective_status)"
   recommendation="$(fc_fit_result_value RECOMMEND_MBPS || true)"
   knee="$(fc_fit_result_value KNEE_MBPS || true)"
   cap="$(fc_fit_result_value CAP_MBPS || true)"
@@ -498,6 +566,7 @@ fc_fit_summary() {
   current_per_flow="$(fc_fit_result_value CURRENT_PER_FLOW_MBPS || true)"
   case "$status" in
     fitted) printf '拐点 %s / 建议 %s Mbps\n' "${knee:-?}" "${recommendation:-?}" ;;
+    stale-fitted) printf '旧拟合结果已过期或出口已变化，请重新测量\n' ;;
     above-cap)
       printf '链路能力 %s Mbps > 测试上限 %s Mbps / 保留整形 %s/%s Mbps\n' \
         "${unshaped:-?}" "${cap:-?}" "${current_per_flow:-?}" "${current_total:-?}"
@@ -522,6 +591,7 @@ fc_fit_apply_result() {
       ;;
     *) return 0 ;;
   esac
+  fc_preflight_apply
   fc_save_config
   fc_apply_all
 }
@@ -695,13 +765,14 @@ fc_fit_command() {
       fc_info "已选择 ${peer}:${port}（${peer_name}/${peer_provider}，RTT ${peer_rtt}ms）。"
     fi
     peer_attempts=$((peer_attempts + 1))
-    endpoint_fields=("PEER=$peer" "PEER_PORT=$port" "PEER_AUTO=$peer_auto")
+    endpoint_fields=("MEASURED_AT_EPOCH=$(date +%s)" "FIT_IFACE=$iface"
+    "FIT_ROUTE_CKSUM=$(fc_fit_route_checksum)" "PEER=$peer" "PEER_PORT=$port" "PEER_AUTO=$peer_auto")
     if ((peer_auto == 1)); then
       endpoint_fields+=("PEER_RTT_MS=$peer_rtt" "PEER_NAME=$peer_name" "PEER_PROVIDER=$peer_provider")
     fi
     fc_info "开始 tcpfit sweep：${peer}:${port} / 标称 ${nominal} Mbps / cap ${cap} Mbps / ${family#-}"
     FC_FIT_BASE_LOSS=''
-    if ! fc_fit_validate_path "$iface" "$peer" "$port" "$family" "$nominal" "$mem"; then
+    if ! fc_fit_validate_path "$iface" "$peer" "$port" "$family" "$nominal" "$mem" "$cap"; then
       health_error="$FC_FIT_HEALTH_STATUS"
       fc_warn "对端健康检查未通过：${health_error}（${FC_FIT_HEALTH_RATE} Mbps / goodput ${FC_FIT_HEALTH_GOODPUT:--} / loss ${FC_FIT_HEALTH_LOSS:--}%）。"
       if [[ "$health_error" != shaper-failed ]] && ((peer_auto == 1 && peer_attempts < 3)); then
@@ -937,14 +1008,15 @@ fc_fit_command() {
     fi
   fi
 
-  fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
   if [[ -z "$FC_FIT_LAST_OK" ]]; then
+    fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
     fc_fit_store_result 'STATUS=measurement-failed' "${endpoint_fields[@]}" \
       "NOMINAL_MBPS=$nominal" "CAP_MBPS=$cap"
     fc_warn '没有测得可用干净档位；未修改持久配置。'
     return 0
   fi
   if [[ -z "$FC_FIT_BROKE_AT" ]]; then
+    fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
     status=no-knee
     ((user_range == 1)) || status=out-of-range
     fc_fit_store_result "STATUS=$status" "SCANNED_TO_MBPS=$FC_FIT_LAST_OK" \
@@ -958,6 +1030,17 @@ fc_fit_command() {
   [[ -n "$margin" ]] || margin="$(fc_fit_margin "$knee")"
   recommendation=$((knee - margin))
   ((recommendation >= 1)) || recommendation="$knee"
+  fc_info "以 ${recommendation} Mbps 对建议值做 3 次落地复验。"
+  if ! fc_fit_verify_rate "$iface" "$peer" "$port" "$family" "$duration" "$gap" "$threshold" \
+    "$recommendation" "$mem" "$parallel"; then
+    fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
+    fc_fit_store_result 'STATUS=verification-failed' "KNEE_MBPS=$knee" \
+      "RECOMMEND_MBPS=$recommendation" "${endpoint_fields[@]}" \
+      "NOMINAL_MBPS=$nominal" "CAP_MBPS=$cap"
+    fc_warn '建议速率未通过 2/3 落地复验；未修改持久配置。'
+    return 0
+  fi
+  fc_fit_finish_restore || fc_die '恢复出口 qdisc 失败。'
   status=fitted
   fc_fit_store_result 'STATUS=fitted' "KNEE_MBPS=$knee" "MARGIN_MBPS=$margin" "RECOMMEND_MBPS=$recommendation" \
     "BREAK_REASON=$FC_FIT_BREAK_REASON" "LAST_GOODPUT_MBPS=$FC_FIT_LAST_GOODPUT" \

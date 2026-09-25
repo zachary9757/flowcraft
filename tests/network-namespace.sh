@@ -51,4 +51,6 @@ ip netns exec "$namespace" env \
   bash -c "source '$ROOT/lib/flowcraft/core.sh'; source '$ROOT/lib/flowcraft/tuning.sh'; fc_apply_shape"
 
 ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -Eq '^qdisc (htb|tbf|fq) '
+ip netns exec "$namespace" tc class show dev fcguest0 classid 1:10 | grep -Eq 'htb .*rate 900Mbit ceil 900Mbit'
+ip netns exec "$namespace" tc qdisc show dev fcguest0 parent 1:10 | grep -Eq '^qdisc fq .*maxrate 430Mbit'
 printf 'PASS: relay qdisc applied inside network namespace\n'

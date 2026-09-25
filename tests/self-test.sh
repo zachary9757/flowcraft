@@ -69,8 +69,9 @@ check_false() {
 check_eq '450M 160ms buffer with headroom' 20097152 "$(fc_tcp_max 450 160 2048)"
 check_eq '950M 160ms buffer with headroom' 40097152 "$(fc_tcp_max 950 160 4096)"
 check_eq 'small RAM cap' 8388608 "$(fc_tcp_max 1000 300 256)"
-check_eq '2G RAM tcp_mem budget' '32768 65536 131072' "$(fc_tcp_mem_values 2048)"
-check_eq '8G RAM tcp_mem budget' '131072 262144 524288' "$(fc_tcp_mem_values 8192)"
+check_eq '2G RAM tcp_mem budget' '32768 65536 131072' "$(fc_tcp_mem_values 2048 4096)"
+check_eq '8G RAM tcp_mem budget' '131072 262144 524288' "$(fc_tcp_mem_values 8192 4096)"
+check_eq 'tcp_mem budget honors 64K kernel pages' '2048 4096 8192' "$(fc_tcp_mem_values 2048 65536)"
 check_eq 'relay receive RTT' 160 "$(ROLE=relay RTT_MS=160 ORIGIN_RTT_MS=250 fc_recv_rtt)"
 check_eq 'landing receive RTT' 250 "$(ROLE=landing RTT_MS=5 ORIGIN_RTT_MS=250 fc_recv_rtt)"
 ROLE=landing
@@ -98,9 +99,10 @@ check_eq 'policer burst' 210 "$(fc_htb_burst_kb 430 policer)"
 check_eq 'throughput burst' 525 "$(fc_htb_burst_kb 430 throughput)"
 check_eq 'fit margin at 30M' 1 "$(fc_fit_margin 30)"
 check_eq 'fit margin at 500M' 15 "$(fc_fit_margin 500)"
-check_eq 'fit margin above 1G' 40 "$(fc_fit_margin 2500)"
+check_eq 'fit margin keeps at least 3 percent above 1G' 75 "$(fc_fit_margin 2500)"
 check_eq 'fit loss uses bandwidth-relative packet estimate' 0.0322 "$(fc_fit_loss_pct 100 300 12)"
 check_eq 'fit health check uses 40 percent of nominal' 340 "$(fc_fit_health_rate 850)"
+check_eq 'fit health check stays inside 40 percent of cap' 1000 "$(fc_fit_health_rate 10000 2500)"
 check_eq 'fit derives tcpfit sweep bounds from delivered rate and loss' \
   '427 607 18' "$(fc_fit_scan_bounds 450 5 2500)"
 check_true 'fit spike exceeds absolute threshold' fc_fit_is_spike 0.2 0 0.1
@@ -175,6 +177,44 @@ check_eq 'fit confirms only a 2-of-3 loss spike' \
   '1593 1700 loss-spike' "$(<"$spike_scan_result")"
 check_true 'fit reports a confirmed spike sample instead of the clean recheck' \
   grep -Eq '^  1700 +1300 +9000 .*loss spike \(2/3\)$' "$spike_scan_output"
+slow_queue="$TASK_TMP/fit-slow-queue"
+slow_scan_result="$TASK_TMP/fit-slow-result"
+printf '100 0 100\n200 0 100\n300 10000 150\n300 10000 150\n300 10000 150\n' >"$slow_queue"
+(
+  fc_fit_apply_test_rate() { return 0; }
+  fc_fit_measure() {
+    sed -n '1p' "$slow_queue"
+    tail -n +2 "$slow_queue" >"${slow_queue}.next"
+    mv -f "${slow_queue}.next" "$slow_queue"
+  }
+  FC_FIT_LAST_OK=''
+  FC_FIT_LAST_GOODPUT=''
+  FC_FIT_BROKE_AT=''
+  FC_FIT_BASE_LOSS=0
+  FC_FIT_SLOW_HITS=0
+  FC_FIT_PEER_SLOW=0
+  fc_fit_scan_range eth-test peer.test 5201 -4 12 0 0.1 100 300 100 2048 300 >/dev/null
+  printf '%s %s %s\n' "$FC_FIT_LAST_OK" "$FC_FIT_LAST_GOODPUT" "$FC_FIT_BROKE_AT" >"$slow_scan_result"
+)
+check_eq 'below-target goodput is never promoted to the clean knee' '100 100 300' "$(<"$slow_scan_result")"
+verify_queue="$TASK_TMP/fit-verify-queue"
+verify_result="$TASK_TMP/fit-verify-result"
+printf '100 0 100\n100 10000 80\n100 10000 80\n' >"$verify_queue"
+(
+  fc_fit_apply_test_rate() { return 0; }
+  fc_fit_measure() {
+    sed -n '1p' "$verify_queue"
+    tail -n +2 "$verify_queue" >"${verify_queue}.next"
+    mv -f "${verify_queue}.next" "$verify_queue"
+  }
+  FC_FIT_BASE_LOSS=0
+  if fc_fit_verify_rate eth-test peer.test 5201 -4 12 0 0.1 100 2048 >/dev/null; then
+    printf 'accepted\n' >"$verify_result"
+  else
+    printf 'rejected\n' >"$verify_result"
+  fi
+)
+check_eq 'recommendation verification requires two clean samples' rejected "$(<"$verify_result")"
 check_eq '1 CPU mask' 1 "$(fc_cpu_mask 1)"
 check_eq '32 CPU mask' ffffffff "$(fc_cpu_mask 32)"
 check_eq '33 CPU mask' 1,ffffffff "$(fc_cpu_mask 33)"
@@ -239,6 +279,8 @@ check_eq 'completed fitted flow directs the user to verification' \
   '[7] 用 status / diagnose 复核实测配置' "$(fc_menu_next_action 1 complete fitted)"
 check_eq 'failed peer flow directs the user to retry measurement' \
   '[8] 更换或指定对端后重试，再用 [7] 复核' "$(fc_menu_next_action 1 complete peer-too-slow)"
+check_eq 'failed recommendation verification directs the user to retry measurement' \
+  '[8] 更换或指定对端后重试，再用 [7] 复核' "$(fc_menu_next_action 1 complete verification-failed)"
 check_true 'fit menu distinguishes shaping from physical capacity' grep -q '当前 Flowcraft 整形' "$ROOT/lib/flowcraft/commands.sh"
 check_true 'fit menu exposes a private-peer scan ceiling' grep -q '最高扫描速率 Mbps' "$ROOT/lib/flowcraft/commands.sh"
 check_true 'fit menu describes per-flow assignment as synchronization' grep -q '单流上限同步为实测推荐值' "$ROOT/lib/flowcraft/commands.sh"
@@ -295,14 +337,17 @@ check_false 'public menu never forwards a user-controlled scan ceiling' grep -q 
 role_config="$TASK_TMP/role-preserve.conf"
 role_fit_result="$TASK_TMP/role-fit-result"
 {
-  printf 'ROLE=landing\nRTT_MS=5\nORIGIN_RTT_MS=150\n'
+  printf 'ROLE=landing\nIFACE=eth-test\nRTT_MS=5\nORIGIN_RTT_MS=150\n'
   printf 'PER_FLOW_MBPS=1000\nTOTAL_MBPS=850\nBURST_MODE=throughput\nSHAPER_MODE=auto\n'
 } >"$role_config"
-printf 'STATUS=fitted\nRECOMMEND_MBPS=680\nKNEE_MBPS=705\n' >"$role_fit_result"
+printf 'STATUS=fitted\nRECOMMEND_MBPS=680\nKNEE_MBPS=705\nMEASURED_AT_EPOCH=%s\nFIT_IFACE=eth-test\nFIT_ROUTE_CKSUM=123\n' \
+  "$(date +%s)" >"$role_fit_result"
 (
   FC_CONFIG_FILE="$role_config"
   FC_FIT_RESULT="$role_fit_result"
+  fc_fit_route_checksum() { printf '123\n'; }
   fc_menu_require_config() { return 0; }
+  fc_preflight_apply() { return 0; }
   fc_apply_all() { return 0; }
   fc_menu_role <<'EOF' >/dev/null
 2
@@ -318,6 +363,8 @@ check_true 'role switch resets relay RTT to its own baseline' grep -q '^RTT_MS=1
 (
   FC_CONFIG_FILE="$role_config"
   FC_FIT_RESULT="$role_fit_result"
+  fc_fit_route_checksum() { printf '123\n'; }
+  fc_preflight_apply() { return 0; }
   fc_apply_all() { return 0; }
   fc_profile general
 )
@@ -326,7 +373,9 @@ check_true 'general profile aligns its internal per-flow rate with fitted total'
 (
   FC_CONFIG_FILE="$role_config"
   FC_FIT_RESULT="$role_fit_result"
+  fc_fit_route_checksum() { printf '123\n'; }
   fc_menu_require_config() { return 0; }
+  fc_preflight_apply() { return 0; }
   fc_apply_all() { return 0; }
   fc_menu_role <<'EOF' >/dev/null
 3
@@ -336,6 +385,34 @@ EOF
 )
 check_true 'role switch can clear total shaping before a requested retest' grep -q '^TOTAL_MBPS=0$' "$role_config"
 check_true 'landing role establishes its own RTT baseline before retest' grep -q '^RTT_MS=5$' "$role_config"
+
+printf 'STATUS=fitted\nRECOMMEND_MBPS=680\nMEASURED_AT_EPOCH=1\nFIT_IFACE=eth-test\nFIT_ROUTE_CKSUM=123\n' >"$role_fit_result"
+saved_fit_result="$FC_FIT_RESULT"
+FC_FIT_RESULT="$role_fit_result"
+fc_fit_current_iface() { printf 'eth-test\n'; }
+fc_fit_route_checksum() { printf '123\n'; }
+check_false 'expired fit recommendations are not reused' fc_fit_recommendation
+printf 'STATUS=fitted\nRECOMMEND_MBPS=680\nMEASURED_AT_EPOCH=%s\nFIT_IFACE=other0\nFIT_ROUTE_CKSUM=123\n' \
+  "$(date +%s)" >"$role_fit_result"
+check_false 'fit recommendations from another interface are not reused' fc_fit_recommendation
+check_eq 'mismatched fitted result is exposed as stale' stale-fitted "$(fc_fit_effective_status)"
+{
+  printf 'ROLE=general\nIFACE=eth-test\nRTT_MS=160\nORIGIN_RTT_MS=150\n'
+  printf 'PER_FLOW_MBPS=680\nTOTAL_MBPS=680\nBURST_MODE=policer\nSHAPER_MODE=htb\n'
+} >"$role_config"
+(
+  FC_CONFIG_FILE="$role_config"
+  FC_FIT_RESULT="$role_fit_result"
+  fc_preflight_apply() { return 0; }
+  fc_apply_all() { return 0; }
+  fc_profile relay
+)
+check_true 'profile switch clears a stale fitted total from another interface' grep -q '^TOTAL_MBPS=0$' "$role_config"
+FC_FIT_RESULT="$saved_fit_result"
+unset -f fc_fit_current_iface fc_fit_route_checksum
+# Restore the production helpers replaced by the focused context tests above.
+# shellcheck source=../lib/flowcraft/fit.sh
+source "$ROOT/lib/flowcraft/fit.sh"
 
 mkdir -p "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d"
 printf 'net.ipv4.tcp_congestion_control = bbr\n' >"$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d/legacy.conf"
@@ -347,6 +424,86 @@ check_true 'tcpfit qdisc owner is detected' grep -q 'tcpfit-qdisc.service' < <(f
 rm -f "$FLOWCRAFT_ROOT_PREFIX/etc/systemd/system/tcpfit-qdisc.service"
 empty_conflicts="$(fc_find_conflicts | sort -u)"
 check_eq 'empty conflict scan succeeds under pipefail' '' "$empty_conflicts"
+check_false 'complex pre-existing qdisc is refused before takeover' bash -c '
+  set -Eeuo pipefail
+  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  source "$1/lib/flowcraft/core.sh"
+  source "$1/lib/flowcraft/tuning.sh"
+  FC_QDISC_SNAPSHOT="$2/complex-qdisc.snapshot"
+  tc() { printf "qdisc cake 8001: root bandwidth 500Mbit\n"; }
+  fc_record_qdisc eth-test
+' _ "$ROOT" "$TASK_TMP"
+preflight_config="$TASK_TMP/preflight-config.conf"
+preflight_copy="$TASK_TMP/preflight-config.before"
+printf 'ROLE=general\nIFACE=eth-test\nSHAPER_MODE=fq\nTOTAL_MBPS=0\n' >"$preflight_config"
+cp "$preflight_config" "$preflight_copy"
+check_false 'qdisc command rejects an unrestorable root before saving config' bash -c '
+  set -Eeuo pipefail
+  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_CONFIG_FILE="$2/preflight-config.conf"
+  export FLOWCRAFT_STATE_DIR="$2/preflight-state"
+  source "$1/lib/flowcraft/core.sh"
+  source "$1/lib/flowcraft/tuning.sh"
+  source "$1/lib/flowcraft/commands.sh"
+  tc() { printf "qdisc cake 8001: root bandwidth 500Mbit\n"; }
+  fc_qdisc_command fq
+' _ "$ROOT" "$TASK_TMP"
+check_true 'failed qdisc preflight leaves config unchanged' cmp -s "$preflight_copy" "$preflight_config"
+printf 'IFACE=old0\nKIND=fq\n' >"$TASK_TMP/other-iface.snapshot"
+check_false 'an existing qdisc snapshot cannot silently move to another interface' bash -c '
+  set -Eeuo pipefail
+  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  source "$1/lib/flowcraft/core.sh"
+  source "$1/lib/flowcraft/tuning.sh"
+  FC_QDISC_SNAPSHOT="$2/other-iface.snapshot"
+  fc_record_qdisc new0
+' _ "$ROOT" "$TASK_TMP"
+
+gai_test="$TASK_TMP/gai.conf"
+gai_sed_log="$TASK_TMP/gai-sed.log"
+: >"$gai_sed_log"
+printf 'precedence ::ffff:0:0/96  100\nlabel 2001:db8::/32  10\n' >"$gai_test"
+(
+  sed() {
+    printf '%s\n' "$*" >>"$gai_sed_log"
+    command sed "$@"
+  }
+  FLOWCRAFT_GAI_FILE="$gai_test" IPV4_PRIORITY=off fc_apply_ipv4_priority
+)
+check_true 'disabled IPv4 priority preserves an unowned existing rule' \
+  grep -Fqx 'precedence ::ffff:0:0/96  100' "$gai_test"
+check_true 'disabled IPv4 priority does not edit an unowned gai.conf' test ! -s "$gai_sed_log"
+managed_gai="$TASK_TMP/managed-gai.conf"
+printf 'label 2001:db8::/32  10\n' >"$managed_gai"
+FLOWCRAFT_GAI_FILE="$managed_gai" IPV4_PRIORITY=on fc_apply_ipv4_priority
+check_true 'IPv4 priority enable adds its managed rule' grep -Fqx 'precedence ::ffff:0:0/96  100' "$managed_gai"
+FLOWCRAFT_GAI_FILE="$managed_gai" IPV4_PRIORITY=off fc_apply_ipv4_priority
+check_false 'IPv4 priority disable removes only its managed rule' grep -Fqx 'precedence ::ffff:0:0/96  100' "$managed_gai"
+check_true 'IPv4 priority disable preserves unrelated gai.conf content' grep -Fqx 'label 2001:db8::/32  10' "$managed_gai"
+
+route_log="$TASK_TMP/route-args"
+(
+  INITCWND=32
+  FC_ROUTE_SNAPSHOT="$TASK_TMP/route.snapshot"
+  ip() {
+    if [[ "${1:-}" == -4 ]]; then
+      printf 'default via 192.0.2.1 dev eth-test proto static\n'
+      return 0
+    fi
+    printf '<%s>' "$@" >"$route_log"
+  }
+  fc_apply_initcwnd eth-test
+)
+check_eq 'default route is passed to ip as separate arguments' \
+  '<route><replace><default><via><192.0.2.1><dev><eth-test><proto><static><initcwnd><32><initrwnd><32>' \
+  "$(<"$route_log")"
+floor_result="$(
+  sysctl() {
+    [[ "${1:-}" == -n && "${2:-}" == fs.file-max ]] && printf '999999\n'
+  }
+  fc_sysctl_floor fs.file-max 262144
+)"
+check_eq 'sysctl capacity floors never lower an existing limit' 999999 "$floor_result"
 
 while IFS= read -r key; do
   [[ -n "$key" ]] || continue
@@ -411,6 +568,34 @@ fc_fit_probe_iperf peer.test 5201 -4
 check_true 'peer capability probe limits transfer by bytes' grep -q -- '-n 1M' "$FLOWCRAFT_IPERF_LOG"
 check_false 'peer capability probe is not a duration-based unlimited test' grep -q -- '-t 3' "$FLOWCRAFT_IPERF_LOG"
 
+rps_root="$TASK_TMP/rps-sys"
+mkdir -p "$rps_root/eth-test/queues/rx-0" "$rps_root/eth-other/queues/rx-0"
+printf '0\n' >"$rps_root/eth-test/queues/rx-0/rps_cpus"
+printf '0\n' >"$rps_root/eth-test/queues/rx-0/rps_flow_cnt"
+printf '0\n' >"$rps_root/eth-other/queues/rx-0/rps_cpus"
+printf '0\n' >"$rps_root/eth-other/queues/rx-0/rps_flow_cnt"
+(
+  FLOWCRAFT_SYS_CLASS_NET="$rps_root"
+  FC_RPS_SNAPSHOT="$TASK_TMP/rps-target.snapshot"
+  IFACE=eth-test
+  RPS_MODE=auto
+  fc_cpu_count() { printf '4\n'; }
+  fc_apply_rps
+)
+check_eq 'RPS applies to the selected interface' f "$(<"$rps_root/eth-test/queues/rx-0/rps_cpus")"
+check_eq 'RPS leaves unrelated interfaces unchanged' 0 "$(<"$rps_root/eth-other/queues/rx-0/rps_cpus")"
+check_false 'RPS cannot reuse another interface snapshot' bash -c '
+  set -Eeuo pipefail
+  export FLOWCRAFT_VERSION=0.5.0 FLOWCRAFT_ALLOW_NON_ROOT_TESTS=1
+  export FLOWCRAFT_STATE_DIR="$2/state" FLOWCRAFT_SYS_CLASS_NET="$2/rps-sys"
+  source "$1/lib/flowcraft/core.sh"
+  source "$1/lib/flowcraft/tuning.sh"
+  FC_RPS_SNAPSHOT="$2/rps-target.snapshot"
+  IFACE=eth-other RPS_MODE=auto
+  fc_cpu_count() { printf "4\n"; }
+  fc_apply_rps
+' _ "$ROOT" "$TASK_TMP"
+
 FC_DRY_RUN=1
 dry_output="$(fc_write_sysctl_profile 2>&1)"
 check_true 'dry-run renders sysctl profile' grep -q 'net.core.default_qdisc = fq' <<<"$dry_output"
@@ -426,6 +611,10 @@ mkdir -p "$FLOWCRAFT_STATE_DIR"
 printf 'net.core.somaxconn=128\nnet.ipv4.tcp_fin_timeout=60\n' >"$FC_SYSCTL_SNAPSHOT"
 fc_restore_sysctl_snapshot >/dev/null
 check_true 'snapshot restores exact sysctl value' grep -q '^net.core.somaxconn=128$' "$FLOWCRAFT_SYSCTL_LOG"
+printf 'net.ipv4.tcp_notsent_lowat=16384\n' >"$FC_SYSCTL_SNAPSHOT"
+fc_restore_sysctl_snapshot_key net.ipv4.tcp_notsent_lowat
+check_true 'normal profile can clear an extreme-only runtime value' \
+  grep -q '^net.ipv4.tcp_notsent_lowat=16384$' "$FLOWCRAFT_SYSCTL_LOG"
 
 fc_default_config
 ROLE=relay
@@ -593,8 +782,35 @@ check_true 'automatic fit persists the clean replacement peer' grep -q '^PEER=go
 )
 check_true 'tcpfit sweep persists a confirmed fitted result' grep -q '^STATUS=fitted$' "$FC_FIT_RESULT"
 check_true 'fine scan records the final clean knee' grep -q '^KNEE_MBPS=524$' "$FC_FIT_RESULT"
-check_true 'fitted margin is calculated from the measured knee band' grep -q '^RECOMMEND_MBPS=509$' "$FC_FIT_RESULT"
+check_true 'fitted margin is calculated from the measured knee band' grep -q '^RECOMMEND_MBPS=508$' "$FC_FIT_RESULT"
 check_true 'fitted result records its loss trigger' grep -q '^BREAK_REASON=loss-spike$' "$FC_FIT_RESULT"
+(
+  fit_current_rate=0
+  fc_fit_validate_path() {
+    FC_FIT_HEALTH_RATE=200
+    FC_FIT_HEALTH_GOODPUT=198
+    FC_FIT_HEALTH_LOSS=0
+    FC_FIT_HEALTH_STATUS=clean
+    FC_FIT_BASE_LOSS=0
+  }
+  fc_fit_apply_unshaped_fq() { fit_current_rate=0; }
+  fc_fit_restore_managed_qdisc() { return 0; }
+  fc_fit_apply_test_rate() { fit_current_rate="$2"; }
+  fc_fit_measure() {
+    if ((fit_current_rate == 0)); then
+      printf '550 12000 480\n'
+    elif ((fit_current_rate <= 526)); then
+      printf '%s 0 %s\n' "$fit_current_rate" "$((fit_current_rate - 1))"
+    else
+      printf '%s 10000 500\n' "$fit_current_rate"
+    fi
+  }
+  fc_fit_verify_rate() { return 1; }
+  FC_FIT_PRE_SCAN_GAP=0 fc_fit_command --peer peer.test --nominal 300 --gap 0 --apply >/dev/null
+)
+check_true 'failed final verification is persisted distinctly' grep -q '^STATUS=verification-failed$' "$FC_FIT_RESULT"
+check_true 'failed final verification leaves persistent shaping unchanged' \
+  grep -q '^TOTAL_MBPS=510$' "$FLOWCRAFT_CONFIG_FILE"
 (
   fit_current_rate=0
   fc_fit_validate_path() {

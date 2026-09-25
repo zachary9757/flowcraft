@@ -51,13 +51,20 @@ fc_sysctl_proc_path() {
 }
 
 fc_tcp_mem_values() {
-  local mem="$1"
-  awk -v m="$mem" 'BEGIN {
-    pages=m*1024/4
+  local mem="$1" page_size="${2:-}"
+  if [[ -z "$page_size" ]]; then
+    page_size="$(getconf PAGESIZE 2>/dev/null || printf '4096\n')"
+  fi
+  fc_is_uint "$page_size" && ((page_size >= 1024)) || page_size=4096
+  awk -v m="$mem" -v page_size="$page_size" 'BEGIN {
+    pages=m*1024*1024/page_size
     low=int(pages/16); pressure=int(pages/8); high=int(pages/4)
-    if (low<4096) low=4096
-    if (pressure<8192) pressure=8192
-    if (high<16384) high=16384
+    min_low=int(16*1024*1024/page_size)
+    min_pressure=int(32*1024*1024/page_size)
+    min_high=int(64*1024*1024/page_size)
+    if (low<min_low) low=min_low
+    if (pressure<min_pressure) pressure=min_pressure
+    if (high<min_high) high=min_high
     printf "%d %d %d\n", low, pressure, high
   }'
 }
@@ -127,6 +134,16 @@ fc_append_sysctl() {
   fi
 }
 
+fc_sysctl_floor() {
+  local key="$1" proposed="$2" current=''
+  current="$(sysctl -n "$key" 2>/dev/null || true)"
+  if fc_is_uint "$current" && ((current > proposed)); then
+    printf '%s\n' "$current"
+  else
+    printf '%s\n' "$proposed"
+  fi
+}
+
 fc_take_sysctl_snapshot() {
   [[ -e "$FC_SYSCTL_SNAPSHOT" ]] && return 0
   ((FC_DRY_RUN == 0)) || return 0
@@ -156,6 +173,16 @@ fc_restore_sysctl_snapshot() {
   fc_log "已恢复 ${restored} 项安装前 sysctl。"
 }
 
+fc_restore_sysctl_snapshot_key() {
+  local wanted="$1" key value
+  [[ -r "$FC_SYSCTL_SNAPSHOT" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ "$key" == "$wanted" ]] || continue
+    fc_run sysctl -qw "$key=$value" >/dev/null 2>&1 || true
+    return 0
+  done <"$FC_SYSCTL_SNAPSHOT"
+}
+
 fc_write_sysctl_profile() {
   fc_need_root
   fc_take_lock
@@ -165,6 +192,7 @@ fc_write_sysctl_profile() {
     fc_write_extreme_sysctl_profile
     return 0
   fi
+  fc_restore_sysctl_snapshot_key net.ipv4.tcp_notsent_lowat
   local mem recv_rtt reference_rate rmax wmax backlog min_free tcp_mem
   local somax syn_backlog port_range tw_buckets file_max conntrack cc temp
   mem="$(fc_mem_mb)"
@@ -229,11 +257,11 @@ fc_write_sysctl_profile() {
   fc_append_sysctl "$temp" kernel.panic 10
   fc_append_sysctl "$temp" net.core.default_qdisc fq
   fc_append_sysctl "$temp" net.ipv4.tcp_congestion_control "$cc"
-  fc_append_sysctl "$temp" net.core.somaxconn "$somax"
-  fc_append_sysctl "$temp" net.core.netdev_max_backlog "$backlog"
+  fc_append_sysctl "$temp" net.core.somaxconn "$(fc_sysctl_floor net.core.somaxconn "$somax")"
+  fc_append_sysctl "$temp" net.core.netdev_max_backlog "$(fc_sysctl_floor net.core.netdev_max_backlog "$backlog")"
   fc_append_sysctl "$temp" net.core.netdev_budget 600
   fc_append_sysctl "$temp" net.core.netdev_budget_usecs 4000
-  fc_append_sysctl "$temp" net.ipv4.tcp_max_syn_backlog "$syn_backlog"
+  fc_append_sysctl "$temp" net.ipv4.tcp_max_syn_backlog "$(fc_sysctl_floor net.ipv4.tcp_max_syn_backlog "$syn_backlog")"
   fc_append_sysctl "$temp" net.ipv4.tcp_syncookies 1
   fc_append_sysctl "$temp" net.ipv4.tcp_window_scaling 1
   fc_append_sysctl "$temp" net.ipv4.tcp_sack 1
@@ -263,9 +291,9 @@ fc_write_sysctl_profile() {
   fc_append_sysctl "$temp" net.ipv4.udp_rmem_min 16384
   fc_append_sysctl "$temp" net.ipv4.udp_wmem_min 16384
   fc_append_sysctl "$temp" net.ipv4.ip_local_port_range "$port_range"
-  fc_append_sysctl "$temp" net.ipv4.tcp_max_tw_buckets "$tw_buckets"
-  fc_append_sysctl "$temp" fs.file-max "$file_max"
-  fc_append_sysctl "$temp" net.netfilter.nf_conntrack_max "$conntrack"
+  fc_append_sysctl "$temp" net.ipv4.tcp_max_tw_buckets "$(fc_sysctl_floor net.ipv4.tcp_max_tw_buckets "$tw_buckets")"
+  fc_append_sysctl "$temp" fs.file-max "$(fc_sysctl_floor fs.file-max "$file_max")"
+  fc_append_sysctl "$temp" net.netfilter.nf_conntrack_max "$(fc_sysctl_floor net.netfilter.nf_conntrack_max "$conntrack")"
 
   if ((FC_DRY_RUN == 1)); then
     printf '\n将写入 %s：\n' "$FC_SYSCTL_FILE"
@@ -295,7 +323,6 @@ fc_write_extreme_sysctl_profile() {
   fc_append_sysctl "$temp" net.core.somaxconn 65535
   fc_append_sysctl "$temp" net.ipv4.tcp_wmem '4096 1048576 1073741824'
   fc_append_sysctl "$temp" net.ipv4.tcp_rmem '4096 1048576 1073741824'
-  fc_append_sysctl "$temp" net.ipv4.tcp_notsent_lowat 4294967295
   fc_append_sysctl "$temp" net.ipv4.tcp_no_metrics_save 1
   fc_append_sysctl "$temp" net.ipv4.tcp_mtu_probing 1
   fc_append_sysctl "$temp" net.ipv4.tcp_fastopen 3
@@ -313,11 +340,26 @@ fc_write_extreme_sysctl_profile() {
 }
 
 fc_record_qdisc() {
-  local iface="$1" kind
-  [[ -e "$FC_QDISC_SNAPSHOT" || "$FC_DRY_RUN" == 1 ]] && return 0
+  local iface="$1" kind recorded_iface='' key value
+  ((FC_DRY_RUN == 0)) || return 0
+  if [[ -r "$FC_QDISC_SNAPSHOT" ]]; then
+    while IFS='=' read -r key value; do
+      [[ "$key" == IFACE ]] && recorded_iface="$value"
+    done <"$FC_QDISC_SNAPSHOT"
+    [[ -z "$recorded_iface" || "$recorded_iface" == "$iface" ]] ||
+      fc_die "出口网卡已从 ${recorded_iface} 变为 ${iface}；为避免遗留 qdisc，请先回滚后重新安装。"
+    return 0
+  fi
   kind="$(tc qdisc show dev "$iface" 2>/dev/null | awk 'NR==1 {print $2; exit}')"
+  kind="${kind:-unknown}"
+  case "$kind" in
+    fq | fq_codel | pfifo_fast | pfifo | bfifo | mq | noqueue | unknown) ;;
+    *)
+      fc_die "检测到现有复杂 root qdisc ${kind}；Flowcraft 无法无损序列化回滚，请先人工移除或备份。"
+      ;;
+  esac
   mkdir -p "$FC_STATE_DIR"
-  printf 'IFACE=%s\nKIND=%s\n' "$iface" "${kind:-unknown}" >"$FC_QDISC_SNAPSHOT"
+  printf 'IFACE=%s\nKIND=%s\n' "$iface" "$kind" >"$FC_QDISC_SNAPSHOT"
   chmod 0600 "$FC_QDISC_SNAPSHOT"
 }
 
@@ -330,9 +372,14 @@ fc_restore_qdisc() {
   [[ -n "$iface" && -n "$kind" ]] || return 0
   case "$kind" in
     mq | noqueue | unknown) fc_run tc qdisc del dev "$iface" root >/dev/null 2>&1 || true ;;
-    *) fc_run tc qdisc replace dev "$iface" root "$kind" >/dev/null 2>&1 || true ;;
+    *)
+      if ! fc_run tc qdisc replace dev "$iface" root "$kind" >/dev/null 2>&1; then
+        fc_warn "无法恢复 $iface 的原 root qdisc 类型 ${kind}。"
+        return 1
+      fi
+      ;;
   esac
-  fc_log "已尝试恢复 $iface 的原 root qdisc：${kind}。"
+  fc_log "已恢复 $iface 的原 root qdisc 类型：${kind}。"
 }
 
 fc_restore_fq() {
@@ -497,6 +544,7 @@ fc_apply_initcwnd() {
     printf '%s\n' "$route" >"$FC_ROUTE_SNAPSHOT"
   fi
   route="$(printf '%s\n' "$route" | sed -E 's/ initcwnd [0-9]+//g; s/ initrwnd [0-9]+//g')"
+  local IFS=' '
   read -r -a words <<<"$route"
   fc_run ip route replace "${words[@]}" initcwnd "$INITCWND" initrwnd "$INITCWND" >/dev/null 2>&1 ||
     fc_warn "当前平台不支持修改 initcwnd/initrwnd。"
@@ -508,47 +556,75 @@ fc_restore_route() {
   fc_has ip || return 0
   local route words
   route="$(<"$FC_ROUTE_SNAPSHOT")"
+  local IFS=' '
   read -r -a words <<<"$route"
   fc_run ip route replace "${words[@]}" >/dev/null 2>&1 || fc_warn "默认路由恢复失败。"
 }
 
 fc_apply_ipv4_priority() {
-  local gai="${FLOWCRAFT_GAI_FILE:-/etc/gai.conf}"
+  local gai="${FLOWCRAFT_GAI_FILE:-/etc/gai.conf}" line='precedence ::ffff:0:0/96  100'
   if [[ "$IPV4_PRIORITY" == on ]]; then
-    if [[ ! -e "$FC_GAI_BACKUP" && ! -e "$FC_GAI_ABSENT" && "$FC_DRY_RUN" == 0 ]]; then
-      mkdir -p "$FC_STATE_DIR"
-      if [[ -e "$gai" ]]; then cp -p "$gai" "$FC_GAI_BACKUP"; else : >"$FC_GAI_ABSENT"; fi
-    fi
     if ((FC_DRY_RUN == 1)); then
       fc_info "dry-run：将启用 IPv4 地址选择优先级。"
       return 0
     fi
+    mkdir -p "$FC_STATE_DIR"
+    if [[ ! -e "$FC_GAI_BACKUP" && ! -e "$FC_GAI_ABSENT" && ! -e "$FC_GAI_ADDED" && ! -e "$FC_GAI_PREEXISTING" ]]; then
+      if [[ -e "$gai" ]] && grep -Fqx "$line" "$gai"; then
+        : >"$FC_GAI_PREEXISTING"
+      else
+        : >"$FC_GAI_ADDED"
+      fi
+    fi
     mkdir -p "$(dirname "$gai")"
     touch "$gai"
-    grep -Fqx 'precedence ::ffff:0:0/96  100' "$gai" || printf 'precedence ::ffff:0:0/96  100\n' >>"$gai"
+    grep -Fqx "$line" "$gai" || printf '%s\n' "$line" >>"$gai"
   else
     fc_restore_ipv4_priority
   fi
 }
 
 fc_restore_ipv4_priority() {
-  local gai="${FLOWCRAFT_GAI_FILE:-/etc/gai.conf}"
+  local gai="${FLOWCRAFT_GAI_FILE:-/etc/gai.conf}" line='precedence ::ffff:0:0/96  100' temp
+  if ((FC_DRY_RUN == 1)); then
+    if [[ -e "$FC_GAI_BACKUP" || -e "$FC_GAI_ABSENT" || -e "$FC_GAI_ADDED" || -e "$FC_GAI_PREEXISTING" ]]; then
+      fc_info "dry-run：将恢复 Flowcraft 管理的 IPv4 地址选择规则。"
+    fi
+    return 0
+  fi
   if [[ -e "$FC_GAI_BACKUP" ]]; then
     fc_run cp -p "$FC_GAI_BACKUP" "$gai"
   elif [[ -e "$FC_GAI_ABSENT" ]]; then
-    fc_run rm -f "$gai"
-  else
-    ((FC_DRY_RUN == 1)) || sed -i '/^precedence ::ffff:0:0\/96  100$/d' "$gai" 2>/dev/null || true
+    if [[ -r "$gai" ]] && grep -Fvx "$line" "$gai" | grep -q .; then
+      temp="$(mktemp "${gai}.XXXXXX")"
+      grep -Fvx "$line" "$gai" >"$temp" || true
+      fc_atomic_replace "$temp" "$gai" 0644
+    else
+      fc_run rm -f "$gai"
+    fi
+  elif [[ -e "$FC_GAI_ADDED" && -r "$gai" ]]; then
+    temp="$(mktemp "${gai}.XXXXXX")"
+    grep -Fvx "$line" "$gai" >"$temp" || true
+    fc_atomic_replace "$temp" "$gai" 0644
   fi
+  ((FC_DRY_RUN == 1)) || rm -f "$FC_GAI_BACKUP" "$FC_GAI_ABSENT" "$FC_GAI_ADDED" "$FC_GAI_PREEXISTING"
 }
 
 fc_take_rps_snapshot() {
-  [[ -e "$FC_RPS_SNAPSHOT" || "$FC_DRY_RUN" == 1 ]] && return 0
+  local iface="$1" recorded_iface=''
+  if [[ -r "$FC_RPS_SNAPSHOT" ]]; then
+    recorded_iface="$(awk -F= '$1=="meta:iface" {print $2; exit}' "$FC_RPS_SNAPSHOT")"
+    [[ -z "$recorded_iface" || "$recorded_iface" == "$iface" ]] ||
+      fc_die "RPS 快照属于 ${recorded_iface}，当前出口为 ${iface}；请先关闭 RPS 或回滚。"
+    return 0
+  fi
+  ((FC_DRY_RUN == 0)) || return 0
   local root="${FLOWCRAFT_SYS_CLASS_NET:-/sys/class/net}" file
   mkdir -p "$FC_STATE_DIR"
   {
     printf '# path=value\n'
-    for file in "$root"/*/queues/rx-*/rps_cpus "$root"/*/queues/rx-*/rps_flow_cnt; do
+    printf 'meta:iface=%s\n' "$iface"
+    for file in "$root/$iface"/queues/rx-*/rps_cpus "$root/$iface"/queues/rx-*/rps_flow_cnt; do
       [[ -r "$file" ]] && printf '%s=%s\n' "$file" "$(<"$file")"
     done
     printf 'sysctl:net.core.rps_sock_flow_entries=%s\n' "$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || printf 0)"
@@ -558,45 +634,59 @@ fc_take_rps_snapshot() {
 
 fc_apply_rps() {
   [[ "$RPS_MODE" == auto ]] || {
-    fc_restore_rps
+    fc_restore_rps 1
     return 0
   }
-  fc_take_rps_snapshot
-  local root="${FLOWCRAFT_SYS_CLASS_NET:-/sys/class/net}" iface file mask queues=0
+  local root="${FLOWCRAFT_SYS_CLASS_NET:-/sys/class/net}" iface file mask queues=0 desired current
+  iface="$(fc_resolve_iface)"
+  fc_take_rps_snapshot "$iface"
   mask="$(fc_cpu_mask "$(fc_cpu_count)")"
-  for iface in "$root"/*; do
-    [[ -d "$iface/queues" ]] || continue
-    case "$(basename "$iface")" in lo | docker* | veth* | br-* | tun* | wg*) continue ;; esac
-    for file in "$iface"/queues/rx-*/rps_cpus; do
-      [[ -e "$file" ]] || continue
-      queues=$((queues + 1))
-      if ((FC_DRY_RUN == 1)); then printf '[dry-run] %s <- %s\n' "$file" "$mask"; else printf '%s\n' "$mask" >"$file" || true; fi
-    done
-    for file in "$iface"/queues/rx-*/rps_flow_cnt; do
-      [[ -e "$file" ]] || continue
-      if ((FC_DRY_RUN == 1)); then printf '[dry-run] %s <- 4096\n' "$file"; else printf '4096\n' >"$file" || true; fi
-    done
+  for file in "$root/$iface"/queues/rx-*/rps_cpus; do
+    [[ -e "$file" ]] || continue
+    queues=$((queues + 1))
+    if ((FC_DRY_RUN == 1)); then printf '[dry-run] %s <- %s\n' "$file" "$mask"; else printf '%s\n' "$mask" >"$file" || true; fi
   done
-  ((queues > 0)) && fc_run sysctl -qw net.core.rps_sock_flow_entries=$((queues * 4096)) >/dev/null 2>&1 || true
+  for file in "$root/$iface"/queues/rx-*/rps_flow_cnt; do
+    [[ -e "$file" ]] || continue
+    desired=4096
+    current="$(<"$file")"
+    if fc_is_uint "$current" && ((current > desired)); then desired="$current"; fi
+    if ((FC_DRY_RUN == 1)); then printf '[dry-run] %s <- %s\n' "$file" "$desired"; else printf '%s\n' "$desired" >"$file" || true; fi
+  done
+  if ((queues > 0)); then
+    desired=$((queues * 4096))
+    current="$(sysctl -n net.core.rps_sock_flow_entries 2>/dev/null || true)"
+    if fc_is_uint "$current" && ((current > desired)); then desired="$current"; fi
+    fc_run sysctl -qw net.core.rps_sock_flow_entries="$desired" >/dev/null 2>&1 || true
+  fi
 }
 
 fc_restore_rps() {
   [[ -r "$FC_RPS_SNAPSHOT" ]] || return 0
-  local key value
+  local consume="${1:-0}" key value
   while IFS='=' read -r key value; do
     [[ -n "$key" && "$key" != \#* ]] || continue
-    if [[ "$key" == sysctl:* ]]; then
+    if [[ "$key" == meta:* ]]; then
+      continue
+    elif [[ "$key" == sysctl:* ]]; then
       fc_run sysctl -qw "${key#sysctl:}=$value" >/dev/null 2>&1 || true
     elif [[ -e "$key" ]]; then
       if ((FC_DRY_RUN == 1)); then printf '[dry-run] %s <- %s\n' "$key" "$value"; else printf '%s\n' "$value" >"$key" || true; fi
     fi
   done <"$FC_RPS_SNAPSHOT"
+  if ((consume == 1 && FC_DRY_RUN == 0)); then rm -f "$FC_RPS_SNAPSHOT"; fi
+}
+
+fc_preflight_apply() {
+  fc_has tc || fc_die "缺少 tc，请安装 iproute2。"
+  fc_record_qdisc "$(fc_resolve_iface)"
 }
 
 fc_apply_all() {
   if [[ -r "$FC_STAGE_FILE" ]] && grep -q '^STAGE=pending-reboot$' "$FC_STAGE_FILE"; then
     fc_die "内核正在等待重启验证；请先重启并运行 ftcp resume。"
   fi
+  fc_preflight_apply
   fc_write_sysctl_profile
   fc_apply_shape
   fc_load_config
@@ -622,13 +712,15 @@ fc_rollback_all() {
 
 fc_status() {
   fc_load_config
-  local iface cc qdisc root_qdisc kernel bbr_version retrans='unknown'
+  local iface cc qdisc root_qdisc root_detail='' class_detail='' kernel bbr_version retrans='unknown' service='unknown'
   iface="$IFACE"
   [[ "$iface" == auto ]] && iface="$(fc_detect_iface)"
   cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || printf unknown)"
   qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || printf unknown)"
   if fc_has tc && [[ -n "$iface" ]]; then
     root_qdisc="$(tc qdisc show dev "$iface" 2>/dev/null | awk 'NR==1 {print $2; exit}' || true)"
+    root_detail="$(tc qdisc show dev "$iface" 2>/dev/null | awk 'NR==1 {print; exit}' || true)"
+    class_detail="$(tc class show dev "$iface" 2>/dev/null | awk 'NR==1 {print; exit}' || true)"
   else
     root_qdisc=unknown
   fi
@@ -637,6 +729,10 @@ fc_status() {
   if fc_has nstat; then
     retrans="$(nstat -asz 2>/dev/null | awk '$1=="TcpOutSegs"{s=$2}$1=="TcpRetransSegs"{r=$2}END{if(s>0)printf "%.3f%%",r*100/s;else print "n/a"}')"
   fi
+  if fc_has systemctl; then
+    service="$(systemctl is-active flowcraft.service 2>/dev/null || true)"
+    [[ -n "$service" ]] || service=inactive
+  fi
   printf '%bFlowcraft %s%b\n' "$FC_BOLD" "$FLOWCRAFT_VERSION" "$FC_RESET"
   printf '  role:              %s\n' "$ROLE"
   printf '  kernel:            %s\n' "$kernel"
@@ -644,6 +740,9 @@ fc_status() {
   printf '  congestion:        %s\n' "$cc"
   printf '  default qdisc:     %s\n' "$qdisc"
   printf '  interface/root:    %s / %s\n' "${iface:-unknown}" "${root_qdisc:-unknown}"
+  printf '  service:           %s\n' "$service"
+  [[ -z "$root_detail" ]] || printf '  root detail:       %s\n' "$root_detail"
+  [[ -z "$class_detail" ]] || printf '  class detail:      %s\n' "$class_detail"
   printf '  per-flow / total:  %s / %s Mbps\n' "$PER_FLOW_MBPS" "$TOTAL_MBPS"
   printf '  port fit:          %s\n' "$(fc_fit_summary)"
   printf '  retrans since boot:%s\n' "$retrans"
@@ -652,10 +751,30 @@ fc_status() {
 
 fc_diagnose() {
   fc_status
-  local conflicts
+  local conflicts key expected actual drift=0
   conflicts="$(fc_find_conflicts | sort -u)"
   printf '\n冲突检查：\n'
   if [[ -n "$conflicts" ]]; then printf '%s\n' "$conflicts" | sed 's/^/  - /'; else printf '  未发现已知冲突。\n'; fi
   printf '\n能力：\n'
   printf '  tc=%s ip=%s systemd=%s bbr=%s\n' "$(fc_has tc && printf yes || printf no)" "$(fc_has ip && printf yes || printf no)" "$(fc_has systemctl && printf yes || printf no)" "$(grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null && printf yes || printf no)"
+  printf '\n运行态一致性：\n'
+  if [[ -r "$FC_SYSCTL_FILE" ]]; then
+    while IFS='=' read -r key expected; do
+      key="${key## }"
+      key="${key%% }"
+      expected="${expected## }"
+      [[ -n "$key" && "$key" != \#* ]] || continue
+      actual="$(sysctl -n "$key" 2>/dev/null || true)"
+      expected="$(awk '{$1=$1; print}' <<<"$expected")"
+      actual="$(awk '{$1=$1; print}' <<<"$actual")"
+      if [[ "$actual" != "$expected" ]]; then
+        printf '  - %s: 配置=%s / 运行=%s\n' "$key" "$expected" "${actual:-unavailable}"
+        drift=$((drift + 1))
+      fi
+    done <"$FC_SYSCTL_FILE"
+  else
+    printf '  - 缺少 %s。\n' "$FC_SYSCTL_FILE"
+    drift=$((drift + 1))
+  fi
+  ((drift > 0)) || printf '  sysctl 配置与运行态一致。\n'
 }
