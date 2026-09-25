@@ -4,18 +4,24 @@ Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内�
 
 > 当前版本：`0.5.1`。用户命令统一为 `ftcp`。内核安装会影响启动链路，请只在具有 Web/VNC 控制台、救援模式或可选旧内核的 VPS 上操作。
 
-## 能力
+## 角色与能力
 
-- `general`：系统已有 BBR 时启用 BBR，否则回退 Cubic；使用 fq 公平排队，不限速。
-- `relay`：按 RTT、带宽和内存计算 2×BDP 缓冲；使用单连接上限和可选整机总出口双层整形。
-- `landing`：单连接不限速；可选总出口保护；接收缓冲按回源 RTT、发送缓冲按中转 RTT 计算。
-- `fit`：用近端 iperf3 对端实测出口 policer 拐点，粗扫后细扫，并可将推荐总出口值写回 Flowcraft。
-- root qdisc 回退顺序：中转使用 HTB → TBF → fq maxrate；仅总出口使用 CAKE → HTB → TBF。
-- 正常 profile 使用 `2×BDP+2MiB` 缓冲余量、RAM/32 单 socket 上限和 RAM/4 全局 TCP 上限；按运行内核页大小计算 `tcp_mem`，不强制设置 `tcp_notsent_lowat`。
-- 安装前快照 sysctl、默认路由、root qdisc 类型、IPv4 优先和目标出口 RPS/RFS，支持回滚；发现无法无损接管的复杂 root qdisc 时会拒绝安装。
-- 只读体检、配置冲突检查、运行状态与 TCP 重传统计。
-- 可选 IPv4 地址选择优先级和支持任意 CPU 数量的 RPS/RFS 掩码。
-- 在本仓库 GitHub Actions 中为 x86_64、arm64 构建标准与实验性 Max BBRv3 内核。
+| 角色 | 适用场景 | 默认策略 |
+| --- | --- | --- |
+| `general` | 通用 VPS | BBR 可用时启用 BBR，否则使用 Cubic；fq 公平排队，不限速 |
+| `relay` | 中转、代理、复用连接 | 按 RTT、带宽和内存计算缓冲；支持单连接与整机总出口双层整形 |
+| `landing` | 落地、回源 | 单连接不限速；可选总出口保护；接收缓冲按回源 RTT 计算 |
+
+角色描述业务策略，`fit` 测量物理总出口，两者分开管理。`relay` 的单连接上限不应直接当作 VPS 总出口；可信拟合结果只在 30 天内且出口网卡、默认路由未变化时复用。
+
+核心能力：
+
+- 根据 BDP、内存和实际内核页大小生成 TCP/sysctl 配置，不降低系统已有的更高容量上限。
+- 使用 HTB、TBF、CAKE 或 fq 管理默认出口，并在应用前检查 qdisc 所有权和回滚边界。
+- 通过 iperf3 粗扫、细扫和最终复验识别出口 policer 拐点。
+- 快照 sysctl、默认路由、root qdisc 类型、IPv4 优先级和目标出口 RPS/RFS。
+- 提供只读体检、冲突检查、运行态漂移诊断和 TCP 重传统计。
+- 提供 x86_64、arm64 的标准及实验性 Max BBRv3 内核构建。
 
 ## 支持范围
 
@@ -26,8 +32,6 @@ Flowcraft 是面向 Linux VPS 的统一 SSH 网络管理工具，把 BBRv3 内�
 | 其他发行版 | 使用 `--kernel skip`，只应用系统内核支持的功能 |
 
 首版只管理默认出口网卡的 egress，不管理 IFB ingress、多出口策略路由或隧道内层接口。不要与其他 BBR、sysctl、tc 或主机面板网络优化功能同时使用。
-
-角色描述业务行为，拐点拟合描述物理总出口，两者分开管理。首次应先选择角色并完成内核重启验证，再运行菜单 8；`relay` 的单连接上限按客户端/业务线路设置，不应默认同步为 VPS 物理总出口。切换角色时只复用 30 天内、且出口网卡和默认路由未变化的可信拟合建议，也可输入 `r` 暂时不限总出口并在角色应用后重新测量。安全余量取原分档与实测干净拐点 3% 中的较大值。
 
 ## 发布模型
 
@@ -53,7 +57,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zachary9757/flowcraft/main/i
  → [7] status / diagnose 复核
 ```
 
-使用 `--kernel skip` 时不需要重启和 `resume`，菜单 1 完成后可直接进入菜单 8。角色只定义业务 RTT、单流策略和基础 TCP profile；菜单 8 测量 VPS 物理总出口。已有可信拟合结果时，仅切换角色不需要重测；选择 `r`、更换线路/套餐/出口网卡时才重跑菜单 8。项目不再集成 Speedtest/Ookla 通用测速，只保留直接服务于 policer 调优的 iperf3 单流拟合。脚本不会仅因打开菜单而修改网络。
+使用 `--kernel skip` 时不需要重启和 `resume`，菜单 1 完成后可直接进入菜单 8。项目不集成 Speedtest/Ookla 通用测速，只保留直接服务于 policer 调优的 iperf3 拟合。仅打开菜单不会修改网络。
 
 也可以手动克隆仓库并进行只读体检：
 
@@ -132,59 +136,7 @@ ftcp rollback                  恢复安装前网络状态
 ftcp uninstall                 回滚并移除 Flowcraft
 ```
 
-升级安装会移除旧的 `/usr/local/bin/flowcraft`、`/usr/local/sbin/flowcraft` 及过期的 `benchmark-result`，但保留 `/etc/flowcraft`、其余 `/var/lib/flowcraft` 状态与 `flowcraft.service`，从而继续使用原有配置、快照和回滚状态。Flowcraft 不会默认黑名单 `esp4`、`esp6`、`rxrpc`；安全审计只报告状态。
-
-### 已使用旧版本调优的服务器升级
-
-不要先执行 `uninstall` 或 `rollback`。升级入口只替换 `ftcp` 和它的库，不会自动重新应用 sysctl、qdisc 或安装内核。建议避开业务高峰，并保留一个 VPS 控制台会话，按以下顺序操作。
-
-1. 记录当前状态并备份配置、状态和旧程序：
-
-   ```bash
-   sudo ftcp status
-   sudo ftcp diagnose
-
-   flowcraft_backup="/root/flowcraft-before-upgrade-$(date +%Y%m%d-%H%M%S)"
-   sudo install -d -m 0700 "$flowcraft_backup"
-   sudo cp -a /etc/flowcraft "$flowcraft_backup/etc-flowcraft"
-   sudo cp -a /var/lib/flowcraft "$flowcraft_backup/state-flowcraft"
-   sudo cp -a /etc/sysctl.d/99-flowcraft.conf "$flowcraft_backup/99-flowcraft.conf"
-   sudo cp -a /etc/systemd/system/flowcraft.service "$flowcraft_backup/flowcraft.service"
-   sudo test ! -e /usr/local/sbin/ftcp || sudo cp -a /usr/local/sbin/ftcp "$flowcraft_backup/ftcp"
-   sudo test ! -e /usr/local/lib/flowcraft || sudo cp -a /usr/local/lib/flowcraft "$flowcraft_backup/lib-flowcraft"
-   sudo test ! -e /usr/local/sbin/flowcraft || sudo cp -a /usr/local/sbin/flowcraft "$flowcraft_backup/legacy-flowcraft"
-   sudo test -r /var/lib/flowcraft/qdisc.snapshot
-   ```
-
-   最后一条命令必须成功。若 qdisc 快照缺失，不要执行后面的 `apply`：新版无法证明当前复杂 qdisc 是 Flowcraft 创建的，也无法承诺无损回滚，需要先人工确认当前 `tc qdisc show` 和恢复方案。
-
-2. 只升级程序文件，不进入菜单：
-
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/zachary9757/flowcraft/main/install.sh \
-     | sudo env FLOWCRAFT_NO_MENU=1 bash
-   ftcp version
-   ```
-
-3. 使用原配置应用新版计算和保护逻辑，然后立即复核：
-
-   ```bash
-   sudo ftcp apply
-   sudo ftcp status
-   sudo ftcp diagnose
-   ```
-
-   `apply` 不会安装或切换内核，也不需要运行 `resume`。只有主动执行新的内核安装时才需要重启和 `resume`。如果出口网卡已经变化，新版会拒绝复用旧 qdisc/RPS 快照；此时应先恢复旧出口或根据备份完成回滚，不要删除快照后强行应用。
-
-4. 重新执行物理出口拟合。旧版本的 `fit-result` 没有测量时间、出口网卡和默认路由指纹，会显示为过期；原来的 `TOTAL_MBPS` 仍保留，但在重新拟合前不要切换角色：
-
-   ```bash
-   # 将 500 换成套餐或线路的参考 Mbps；有独享对端时优先指定 --peer
-   sudo ftcp fit --nominal 500 --apply
-   sudo ftcp diagnose
-   ```
-
-   也可以运行 `sudo ftcp menu`，选择菜单 8 完成拟合，再用菜单 7 复核。只有最终 3 次验证中至少 2 次合格时，新建议值才会写入配置；节点繁忙、路径丢包或验证失败都会保留升级前的总出口设置。
+覆盖安装会替换程序文件并清理旧命令入口，但保留 `/etc/flowcraft`、`/var/lib/flowcraft` 和现有服务状态。升级不会自动切换内核。Flowcraft 不会默认黑名单 `esp4`、`esp6`、`rxrpc`；安全审计只报告状态。
 
 ### 端口拐点实测
 
@@ -198,15 +150,16 @@ sudo ftcp fit --peer 192.0.2.10 --nominal 850 --cap 6000
 sudo ftcp fit --peer 192.0.2.10 --nominal 850 --from 600 --to 1000 --step 20
 ```
 
-自动模式使用 tcpfit 0.5.6 的 sweep 状态机。Flowcraft 先在 `min(标称值, cap)` 的 40% 用 2 流、8 秒验证路径和对端，再临时切换为不限速 `fq` 做 12 秒单流探测。单流送达低于标称值 70% 时额外取两次样本，并采用送达量最高的整组 sender/receiver/retrans 数据，避免公共节点瞬时拥塞把扫描区间拉低。
+自动拟合流程：
 
-不限速送达量超过 `--cap`（默认 2500 Mbps）时结果为 `above-cap`，表示已确认链路能力高于本次安全测试范围，不是测试失败；现有整形配置会完整保留。不限速丢包不超过 0.1% 时结果为 `no-knee`。两种情况都没有可应用的 policer 拐点，即使提供 `--apply` 也保留现有配置。标称值高于 cap、且单流在 cap 以下同时高丢包时，会补一次 8 流聚合探测，避免把高带宽长 RTT 的单流窗口限制误认成 policer。
+1. 在 `min(标称值, cap)` 的 40% 验证路径和对端。
+2. 临时使用不限速 fq 探测单流能力；低送达量会补取样本，高带宽疑点会用多流反证。
+3. 仅在不限速样本出现高丢包时进入粗扫和细扫；同一档位至少 2/3 次出现丢包跳变才确认拐点。
+4. 从最后一个干净档位扣除分档余量或 3%（取较大值），再对建议速率做 3 次落地复验。
 
-只有不限速高丢包才进入扫描。扫描下界取实际送达量的 95%，上界按丢包率从约 1.25 倍动态放宽、最高不超过 2.5 倍及 cap，区间约取 10 个采样点。丢包跳变阈值为 `max(0.1%, 5×干净本底)` 且相对阈值封顶 1%；同一档位必须 3 次中至少 2 次跳变才确认。送达量低于目标 70% 的档位不会被记为干净上限。第一档即跳变时最多向下测试三次 75% 控制点，以区分真实浅拐点与稳定路径底噪。粗扫确认后再以原步长的 1/4 细扫。
+只有最终至少 2/3 次达到目标 90% 且无丢包跳变，结果才会记为 `fitted`。其余状态只记录结果，不修改持久配置。公共节点测试上限为 2500 Mbps；更高速率必须通过 `--peer` 使用近端独享服务器。
 
-粗扫和细扫结束后，Flowcraft 会在建议速率再测 3 次；至少 2 次达到目标 90% 且没有丢包跳变才记为 `fitted`。`above-cap`、`no-knee`、`out-of-range`、`dirty-path`、`peer-too-slow`、`measurement-failed`、`verification-failed` 和 `shaper-failed` 都只记录结果，不修改持久配置。公共节点 cap 最高为 2500 Mbps；更高速率必须用 `--peer` 指定近端独享服务器，交互菜单会在指定对端后开放 cap 输入并对高带宽流量二次确认。`--discover` 和 `--ceiling` 仅作为 0.4.x 兼容参数保留，前者不再改变测试状态机。
-
-自动模式默认只接受 RTT 不超过 100 ms 的节点；50 ms 以上会明确提示结果可能偏保守。低速健康检查发现路径脏或对端过慢时会自动换节点，最多尝试三个。公共节点由第三方免费提供，存在占线、维护或策略变化；自动发现不会安装软件，也不会修改防火墙。
+自动模式只接受 RTT 不超过 100 ms 的节点，低速健康检查失败时最多轮换三个节点。公共节点可能占线或维护；自动发现不会安装软件或修改防火墙。
 
 每个测量档位都会先安装对应的临时 HTB，退出、中断或失败后按当前 Flowcraft 配置重建 root qdisc。结果保存在 `/var/lib/flowcraft/fit-result`，包含测量时间、出口网卡、默认路由指纹、测试范围、实际对端、端口、RTT 与是否自动选择；超过 30 天或出口上下文变化后不会自动复用。
 
@@ -238,7 +191,7 @@ Flowcraft 拒绝卸载正在运行的 Flowcraft 内核，也不会自动清除�
 ## 开发验证
 
 ```bash
-bash -n bin/ftcp lib/flowcraft/*.sh kernel/scripts/*.sh tests/*.sh
+bash -n install.sh bin/ftcp lib/flowcraft/*.sh kernel/scripts/*.sh tests/*.sh
 bash tests/self-test.sh
 bash tests/install-smoke.sh
 sudo bash tests/network-namespace.sh
