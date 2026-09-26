@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+report_error() {
+  local status=$?
+  printf 'FAIL: line %s: %s (exit %s)\n' "$1" "$2" "$status" >&2
+  exit "$status"
+}
+trap 'report_error "$LINENO" "$BASH_COMMAND"' ERR
+
 [[ "$(uname -s)" == Linux ]] || { printf 'SKIP: Linux required\n'; exit 0; }
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { printf 'SKIP: root required\n'; exit 0; }
 if ! command -v ip >/dev/null || ! command -v tc >/dev/null; then
