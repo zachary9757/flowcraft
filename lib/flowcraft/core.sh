@@ -46,8 +46,8 @@ fc_atomic_replace() {
     rm -f "$source"
     return 0
   fi
-  mkdir -p "$(dirname "$target")"
-  chmod "$mode" "$source"
+  mkdir -p "$(dirname "$target")" || return 1
+  chmod "$mode" "$source" || return 1
   mv -f "$source" "$target"
 }
 

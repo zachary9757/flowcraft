@@ -25,7 +25,7 @@ fc_apply_abort() {
   if (( tc_changed == 1 )); then
     fc_tc_abort || failed=1
   elif (( FC_TC_TXN_WAS_MANAGED == 0 && failed == 0 )); then
-    rm -f "$FC_QDISC_SNAPSHOT"
+    rm -f "$FC_QDISC_SNAPSHOT" || failed=1
   fi
   if (( failed == 0 )); then
     fc_sysctl_transaction_cleanup
@@ -39,8 +39,8 @@ fc_apply() {
   fc_take_lock
   fc_config_load
   [[ "$(uname -s)" == Linux ]] || fc_die 'apply 只支持 Linux。'
-  if ! fc_has ip || ! fc_has tc || ! fc_has sysctl || ! fc_has cksum; then
-    fc_die '缺少 iproute2、procps 或 cksum。'
+  if ! fc_has ip || ! fc_has tc || ! fc_has sysctl || ! fc_has cksum || ! fc_has cmp; then
+    fc_die '缺少 iproute2、procps、cksum 或 cmp。'
   fi
   fc_assert_supported_route
   fc_assert_no_conflicts

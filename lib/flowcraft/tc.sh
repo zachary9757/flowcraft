@@ -42,7 +42,7 @@ fc_tc_plan() {
 
 fc_tc_snapshot() {
   local iface="$1" kind temp
-  if [[ -e "$FC_QDISC_SNAPSHOT" ]]; then
+  if [[ -e "$FC_QDISC_SNAPSHOT" || -L "$FC_QDISC_SNAPSHOT" ]]; then
     fc_tc_snapshot_validate "$iface" || fc_die 'qdisc 快照无效，拒绝修改运行态。'
     return 0
   fi
@@ -133,7 +133,7 @@ fc_tc_abort() {
   fi
   if fc_tc_restore; then
     rm -f "$FC_QDISC_SNAPSHOT" "$FC_MANAGED_STATE"
-    return 0
+    return
   fi
   return 1
 }
@@ -259,7 +259,7 @@ fc_tc_transaction_begin() {
   local iface="$1" actual current_role="$ROLE" current_per_flow="$PER_FLOW_MBPS"
   local current_total="$TOTAL_MBPS" current_mode="$QDISC_MODE"
   FC_TC_TXN_WAS_MANAGED=0
-  if [[ -e "$FC_MANAGED_STATE" ]]; then
+  if [[ -e "$FC_MANAGED_STATE" || -L "$FC_MANAGED_STATE" ]]; then
     fc_managed_state_load || return 1
     actual="$(fc_root_qdisc "$iface")"
     [[ "$FC_MANAGED_IFACE" == "$iface" && "$FC_MANAGED_QDISC" == "$actual" ]] || {
@@ -315,7 +315,8 @@ fc_tc_verify() {
   case "$expected" in
     cake)
       root_line="$(awk '$1 == "qdisc" && $2 == "cake" && $0 ~ / root / {print; exit}' <<<"$qdiscs")"
-      [[ -n "$root_line" ]] && fc_tc_rate_matches "$root_line" bandwidth "$TOTAL_MBPS"
+      [[ -n "$root_line" && "$root_line" == *' besteffort'* ]] &&
+        fc_tc_rate_matches "$root_line" bandwidth "$TOTAL_MBPS"
       ;;
     htb)
       root_line="$(awk '$1 == "qdisc" && $2 == "htb" && $0 ~ / root / {print; exit}' <<<"$qdiscs")"

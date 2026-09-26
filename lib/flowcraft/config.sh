@@ -24,7 +24,7 @@ fc_config_valid() {
 
 fc_config_load() {
   fc_config_defaults
-  [[ -e "$FC_CONFIG_FILE" ]] || return 0
+  [[ -e "$FC_CONFIG_FILE" || -L "$FC_CONFIG_FILE" ]] || return 0
   [[ -f "$FC_CONFIG_FILE" && -r "$FC_CONFIG_FILE" ]] || {
     fc_warn "配置文件不可读或不是普通文件：$FC_CONFIG_FILE"
     return 1
@@ -53,6 +53,7 @@ fc_config_validate_semantics() {
 }
 
 fc_config_save_defaults() {
+  fc_take_lock
   [[ -e "$FC_CONFIG_FILE" ]] && return 0
   local temp
   mkdir -p "$FC_ETC_DIR"

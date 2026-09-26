@@ -66,6 +66,36 @@ mkdir "$FC_CONFIG_FILE"
 if (fc_config_load >/dev/null 2>&1); then fail 'non-regular config was accepted'; fi
 pass 'non-regular configuration fails closed'
 rmdir "$FC_CONFIG_FILE"
+ln -s "$task_tmp/missing-config" "$FC_CONFIG_FILE"
+if (fc_config_load >/dev/null 2>&1); then fail 'dangling config symlink was accepted'; fi
+pass 'dangling configuration symlink fails closed'
+rm -f "$FC_CONFIG_FILE"
+
+atomic_move_marker="$task_tmp/atomic-move-called"
+if (
+  FC_DRY_RUN=0
+  mkdir() { :; }
+  chmod() { return 1; }
+  mv() { touch "$atomic_move_marker"; }
+  fc_atomic_replace "$task_tmp/source" "$task_tmp/target"
+); then
+  fail 'atomic replacement hid a permission failure'
+fi
+[[ ! -e "$atomic_move_marker" ]] || fail 'atomic replacement moved a source after chmod failed'
+pass 'atomic replacement propagates preparation failures'
+
+config_lock_marker="$task_tmp/config-lock-called"
+FC_ETC_DIR="$task_tmp/default-etc"
+FC_CONFIG_FILE="$FC_ETC_DIR/config.conf"
+(
+  fc_take_lock() { touch "$config_lock_marker"; }
+  fc_atomic_replace() { rm -f "$1"; }
+  fc_config_defaults
+  fc_config_save_defaults
+)
+[[ -e "$config_lock_marker" ]] || fail 'default config write bypassed the global lock'
+pass 'default config persistence takes the global lock'
+FC_CONFIG_FILE="$task_tmp/config.conf"
 
 FLOWCRAFT_ROOT_PREFIX="$task_tmp/root"
 mkdir -p "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d"
@@ -82,7 +112,10 @@ FC_QDISC_SNAPSHOT="$FC_STATE_DIR/qdisc.snapshot"
 FC_SYSCTL_SNAPSHOT="$FC_STATE_DIR/sysctl.snapshot"
 FC_MANAGED_STATE="$FC_STATE_DIR/managed.state"
 FC_SYSCTL_FILE="$task_tmp/90-flowcraft.conf"
+FLOWCRAFT_PROC_ROOT="$task_tmp/proc"
 mkdir -p "$FC_STATE_DIR"
+mkdir -p "$FLOWCRAFT_PROC_ROOT/net/ipv4"
+touch "$FLOWCRAFT_PROC_ROOT/net/ipv4/tcp_mtu_probing"
 write_sysctl_snapshot() {
   local value="$1" checksum
   printf '# FlowCraft pre-apply snapshot v1\nnet.ipv4.tcp_mtu_probing=%s\n' "$value" >"$FC_SYSCTL_SNAPSHOT"
@@ -114,6 +147,28 @@ if (fc_tc_snapshot eth0 >/dev/null 2>&1); then
   fail 'qdisc snapshot accepted an existing truncated snapshot'
 fi
 pass 'existing qdisc snapshot is validated before reuse'
+
+rm -f "$FC_SYSCTL_SNAPSHOT"
+printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
+if fc_sysctl_snapshot >/dev/null 2>&1; then
+  fail 'existing managed sysctl file recreated a missing takeover snapshot'
+fi
+pass 'missing takeover snapshot fails closed for an existing sysctl owner'
+rm -f "$FC_SYSCTL_FILE"
+
+touch "$FLOWCRAFT_PROC_ROOT/net/ipv4/tcp_moderate_rcvbuf"
+touch "$FLOWCRAFT_PROC_ROOT/net/ipv4/tcp_window_scaling"
+if (
+  sysctl() {
+    [[ "$2" == net.ipv4.tcp_moderate_rcvbuf ]] && { printf '1\n'; return 0; }
+    return 1
+  }
+  fc_sysctl_snapshot >/dev/null 2>&1
+); then fail 'partial sysctl snapshot was accepted after a managed key read failed'; fi
+[[ ! -e "$FC_SYSCTL_SNAPSHOT" ]] || fail 'failed sysctl snapshot left reusable recovery state'
+pass 'sysctl snapshot fails closed when any managed key cannot be read'
+rm -f "$FLOWCRAFT_PROC_ROOT/net/ipv4/tcp_moderate_rcvbuf" \
+  "$FLOWCRAFT_PROC_ROOT/net/ipv4/tcp_window_scaling"
 
 printf 'IFACE=eth0\nKIND=noqueue\n' >"$FC_QDISC_SNAPSHOT"
 cat >"$FC_MANAGED_STATE" <<'EOF'
@@ -164,6 +219,21 @@ if (
 ); then fail 'wrong HTB rate passed verification'; fi
 pass 'qdisc verification rejects wrong HTB rate'
 
+if ! (
+  fc_root_qdisc() { printf 'cake\n'; }
+  ROLE=general TOTAL_MBPS=900 QDISC_MODE=cake
+  tc() { printf 'qdisc cake 1: root refcnt 2 bandwidth 900Mbit besteffort\n'; }
+  fc_tc_verify eth0
+); then fail 'CAKE besteffort state was rejected'; fi
+pass 'qdisc verification accepts CAKE besteffort'
+if (
+  fc_root_qdisc() { printf 'cake\n'; }
+  ROLE=general TOTAL_MBPS=900 QDISC_MODE=cake
+  tc() { printf 'qdisc cake 1: root refcnt 2 bandwidth 900Mbit diffserv3\n'; }
+  fc_tc_verify eth0
+); then fail 'CAKE diffserv mode passed besteffort verification'; fi
+pass 'qdisc verification rejects CAKE diffserv drift'
+
 if (
   fc_root_qdisc() { printf 'htb\n'; }
   ROLE=general PER_FLOW_MBPS=500 TOTAL_MBPS=0 QDISC_MODE=fq
@@ -197,6 +267,51 @@ printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
 grep -Fxq 'net.ipv4.tcp_mtu_probing = 1' "$FC_SYSCTL_FILE" || fail 'previous sysctl file was not restored'
 [[ -e "$FC_SYSCTL_SNAPSHOT" ]] || fail 'repeat sysctl rollback removed takeover snapshot'
 pass 'repeat sysctl failure restores previous managed file'
+
+if (
+  write_sysctl_snapshot 0
+  printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
+  sysctl() { [[ "$1" == -n ]] && printf '1\n'; }
+  cp() { return 1; }
+  fc_sysctl_transaction_begin
+); then fail 'sysctl transaction hid a backup copy failure'; fi
+pass 'sysctl transaction propagates backup copy failures'
+
+printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
+FC_SYSCTL_TXN_WAS_MANAGED=1
+FC_SYSCTL_TXN_BACKUP="$task_tmp/transaction-backup"
+printf 'net.ipv4.tcp_mtu_probing = 0\n' >"$FC_SYSCTL_TXN_BACKUP"
+if (cp() { return 1; }; fc_sysctl_transaction_restore); then
+  fail 'sysctl transaction restore hid a copy failure'
+fi
+grep -Fxq 'net.ipv4.tcp_mtu_probing = 1' "$FC_SYSCTL_FILE" || fail 'failed restore replaced the managed sysctl file'
+pass 'sysctl transaction restore preserves state on copy failure'
+fc_sysctl_transaction_cleanup
+
+sysctl_apply_marker="$task_tmp/sysctl-apply-called"
+if (
+  fc_sysctl_render() { printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$1"; }
+  fc_atomic_replace() { return 1; }
+  sysctl() { touch "$sysctl_apply_marker"; }
+  fc_sysctl_apply
+); then fail 'sysctl apply hid an atomic replacement failure'; fi
+[[ ! -e "$sysctl_apply_marker" ]] || fail 'sysctl apply loaded the old file after replacement failed'
+pass 'sysctl apply propagates atomic replacement failures'
+
+FC_SYSCTL_TXN_WAS_MANAGED=0
+printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
+if (
+  rm() { return 1; }
+  fc_has() { return 1; }
+  fc_sysctl_restore() { :; }
+  fc_sysctl_transaction_restore >/dev/null 2>&1
+); then fail 'first sysctl transaction restore hid a delete failure'; fi
+grep -Fxq 'net.ipv4.tcp_mtu_probing = 1' "$FC_SYSCTL_FILE" || fail 'delete failure unexpectedly changed the sysctl file'
+pass 'first sysctl transaction restore propagates delete failures'
+
+printf '# comments only\n' >"$FC_SYSCTL_FILE"
+if (sysctl() { return 0; }; fc_sysctl_verify); then fail 'empty managed sysctl policy passed verification'; fi
+pass 'sysctl verification rejects a policy without managed keys'
 
 printf '# FlowCraft pre-apply snapshot v1\nnet.ipv4.tcp_mtu_probing=0\n' >"$FC_SYSCTL_SNAPSHOT"
 if fc_sysctl_snapshot_validate >/dev/null 2>&1; then fail 'truncated sysctl snapshot passed validation'; fi
@@ -243,6 +358,17 @@ if (
 fi
 [[ ! -e "$service_marker" ]] || fail 'rollback stopped the service before validating snapshots'
 pass 'rollback validates snapshots before service changes'
+
+write_sysctl_snapshot 0
+printf 'net.ipv4.tcp_mtu_probing = 1\n' >"$FC_SYSCTL_FILE"
+printf 'IFACE=eth0\nKIND=noqueue\n' >"$FC_QDISC_SNAPSHOT"
+if (
+  rm() { return 1; }
+  fc_rollback_internal >/dev/null 2>&1
+); then fail 'manual rollback hid a sysctl delete failure'; fi
+[[ -e "$FC_SYSCTL_SNAPSHOT" ]] || fail 'manual rollback discarded the snapshot after delete failure'
+pass 'manual rollback preserves recovery state on delete failure'
+rm -f "$FC_SYSCTL_FILE" "$FC_SYSCTL_SNAPSHOT"
 
 printf 'IFACE=eth0\nKIND=noqueue\n' >"$FC_QDISC_SNAPSHOT"
 cat >"$FC_MANAGED_STATE" <<'EOF'
