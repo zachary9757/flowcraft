@@ -51,5 +51,5 @@ fc_rollback() {
   fc_rollback_validate || fc_die '回滚前校验失败；未修改服务或网络状态。'
   if fc_has systemctl; then systemctl disable --now flowcraft.service >/dev/null 2>&1 || true; fi
   fc_rollback_internal || fc_die '回滚不完整；快照已保留，请检查警告后重试。'
-  fc_log '已恢复首次接管前的 sysctl 和简单 qdisc 快照。'
+  fc_log '已恢复首次接管前的 sysctl 和已验证 qdisc 快照。'
 }

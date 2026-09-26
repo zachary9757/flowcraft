@@ -11,10 +11,12 @@
 
 ## 可接管队列
 
-FlowCraft 允许从 `noqueue`、没有 root qdisc，或具有标准固定指纹的
-`pfifo_fast` 状态接管。`pfifo_fast` 快照记录 `bands` 与完整 16 项 `priomap`，
-回滚时用内核支持的裸 qdisc 重建并逐项验证。非标准 `pfifo_fast`、已有 `fq`
-（可能带 `maxrate`）以及 `mq`（可能带自定义叶子）仍会被拒绝。
+FlowCraft 允许从 `noqueue`、没有 root qdisc、标准 `pfifo_fast`、当前内核的
+裸默认 `fq`，以及所有叶子均为裸默认 `fq` 的 `mq` 接管。`fq` 通过同内核、
+同 MTU 的临时 dummy 探针建立默认指纹；`mq` 额外记录完整父队列列表。回滚
+会先重建队列、显式恢复每个 `fq` 叶子，再验证全部指纹，避免默认 qdisc 或旧
+`maxrate` 等参数污染恢复结果。非默认 `fq`、
+混合叶子的 `mq`、额外 qdisc、探针失败和队列拓扑漂移仍会被拒绝。
 
 ## 幂等性
 
@@ -30,7 +32,7 @@ FlowCraft 允许从 `noqueue`、没有 root qdisc，或具有标准固定指纹�
 
 1. 唯一默认路由检查并拒绝 ECMP。
 2. 扫描并拒绝其他 sysctl owner。
-3. 首次只接管 `none` 或 `noqueue` root qdisc。
+3. 首次只接管可完整验证并重建的 root qdisc 与叶子拓扑。
 4. 配置仅按白名单解析，异常输入 fail-closed。
 5. 所有持久状态写入和网络变更共用全局 `flock`。
 6. 生成文件和状态文件使用同目录临时文件原子替换。
@@ -44,3 +46,6 @@ FlowCraft 允许从 `noqueue`、没有 root qdisc，或具有标准固定指纹�
 
 `0.2.1` 在不放宽其他 qdisc 的前提下，将标准 `pfifo_fast` 纳入同一套
 snapshot、verify、rollback 门禁。
+
+`0.2.2` 将同一门禁扩展到可运行时证明可重建的默认 `fq` 与 `mq + fq`
+拓扑；无总限速时保留多队列 root，只管理各 TX queue 的 `fq` 叶子。

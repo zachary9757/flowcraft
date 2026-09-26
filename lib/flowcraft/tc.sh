@@ -43,6 +43,170 @@ fc_pfifo_fast_is_standard() {
   [[ "$(fc_pfifo_fast_fingerprint "$1")" == "$FC_PFIFO_FAST_BANDS|$FC_PFIFO_FAST_PRIOMAP" ]]
 }
 
+fc_fq_line_fingerprint() {
+  local line="$1" index=4 token
+  local -a fields options
+  read -r -a fields <<<"$line"
+  (( ${#fields[@]} > 4 )) || return 1
+  [[ "${fields[0]}" == qdisc && "${fields[1]}" == fq &&
+    "${fields[2]}" =~ ^[[:xdigit:]]+:$ ]] || return 1
+  case "${fields[3]}" in
+    root) ;;
+    parent)
+      [[ "${fields[4]:-}" =~ ^[[:xdigit:]]*:[[:xdigit:]]+$ ]] || return 1
+      index=5
+      ;;
+    *) return 1 ;;
+  esac
+  if [[ "${fields[$index]:-}" == refcnt ]]; then
+    fc_is_uint "${fields[$((index + 1))]:-}" || return 1
+    index=$((index + 2))
+  fi
+  (( ${#fields[@]} > index )) || return 1
+  options=("${fields[@]:$index}")
+  for token in "${options[@]}"; do
+    [[ "$token" =~ ^[[:alnum:]_.:/-]+$ ]] || return 1
+  done
+  printf '%s\n' "${options[*]}"
+}
+
+fc_fq_fingerprint() {
+  local iface="$1" wanted="${2:-root}" output line
+  output="$(tc -d qdisc show dev "$iface" 2>/dev/null)" || return 1
+  case "$wanted" in
+    root) line="$(awk '$1 == "qdisc" && $2 == "fq" && $0 ~ / root / {print; exit}' <<<"$output")" ;;
+    *) line="$(awk -v parent="$wanted" '$1 == "qdisc" && $2 == "fq" && $4 == "parent" && $5 == parent {print; exit}' <<<"$output")" ;;
+  esac
+  [[ -n "$line" ]] || return 1
+  fc_fq_line_fingerprint "$line"
+}
+
+fc_fq_default_fingerprint() {
+  local iface="$1" probe="fcq${BASHPID:-$$}" mtu fingerprint='' created=0
+  [[ ${#probe} -le 15 ]] || probe="fcq$$"
+  [[ ! -e "/sys/class/net/$probe" ]] || return 1
+  mtu="$(cat "/sys/class/net/$iface/mtu" 2>/dev/null)" || return 1
+  fc_is_uint "$mtu" || return 1
+  if ip link add "$probe" type dummy >/dev/null 2>&1; then
+    created=1
+  else
+    return 1
+  fi
+  if ! ip link set dev "$probe" mtu "$mtu" >/dev/null 2>&1 ||
+    ! tc qdisc replace dev "$probe" root fq >/dev/null 2>&1 ||
+    ! fingerprint="$(fc_fq_fingerprint "$probe")"; then
+    (( created == 0 )) || ip link del "$probe" >/dev/null 2>&1 || true
+    return 1
+  fi
+  ip link del "$probe" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$fingerprint"
+}
+
+fc_fq_is_standard() {
+  local iface="$1" actual expected qdisc_count
+  actual="$(fc_fq_fingerprint "$iface")" || return 1
+  expected="$(fc_fq_default_fingerprint "$iface")" || return 1
+  qdisc_count="$(tc qdisc show dev "$iface" 2>/dev/null |
+    awk '$1 == "qdisc" {count++} END {print count+0}')" || return 1
+  [[ "$qdisc_count" == 1 && "$actual" == "$expected" ]]
+}
+
+fc_mq_fingerprint() {
+  local iface="$1" output line raw_parent parent fingerprint='' current root_count=0 leaf_count=0
+  local parents=''
+  output="$(tc -d qdisc show dev "$iface" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      'qdisc mq '*root*)
+        root_count=$((root_count + 1))
+        [[ "$line" =~ ^qdisc[[:space:]]+mq[[:space:]]+[[:xdigit:]]+:[[:space:]]+root([[:space:]]+refcnt[[:space:]]+[0-9]+)?[[:space:]]*$ ]] || return 1
+        ;;
+      'qdisc fq '*parent*)
+        raw_parent="$(awk '{for (i=1; i<=NF; i++) if ($i == "parent") {print $(i+1); exit}}' <<<"$line")"
+        [[ "$raw_parent" =~ ^[[:xdigit:]]*:[[:xdigit:]]+$ ]] || return 1
+        parent=":${raw_parent##*:}"
+        [[ " $parents " != *" $parent "* ]] || return 1
+        current="$(fc_fq_line_fingerprint "$line")" || return 1
+        if [[ -z "$fingerprint" ]]; then fingerprint="$current"
+        elif [[ "$current" != "$fingerprint" ]]; then return 1
+        fi
+        parents+="${parents:+ }$parent"
+        leaf_count=$((leaf_count + 1))
+        ;;
+      qdisc*) return 1 ;;
+    esac
+  done <<<"$output"
+  (( root_count == 1 && leaf_count > 0 )) || return 1
+  printf '%s|%s\n' "$parents" "$fingerprint"
+}
+
+fc_mq_is_standard() {
+  local iface="$1" fingerprint parents expected
+  fingerprint="$(fc_mq_fingerprint "$iface")" || return 1
+  parents="${fingerprint%%|*}"
+  fc_mq_parents_available "$iface" "$parents" || return 1
+  expected="$(fc_fq_default_fingerprint "$iface")" || return 1
+  [[ "${fingerprint#*|}" == "$expected" ]]
+}
+
+fc_mq_leaf_parents() {
+  local iface="$1" output line raw_parent parent parents='' normalized=''
+  output="$(tc qdisc show dev "$iface" 2>/dev/null)" || return 1
+  while IFS= read -r line; do
+    [[ "$line" == qdisc* && "$line" == *' parent '* ]] || continue
+    raw_parent="$(awk '{for (i=1; i<=NF; i++) if ($i == "parent") {print $(i+1); exit}}' <<<"$line")"
+    [[ "$raw_parent" =~ ^[[:xdigit:]]*:[[:xdigit:]]+$ ]] || return 1
+    parent=":${raw_parent##*:}"
+    [[ " $normalized " != *" $parent "* ]] || return 1
+    parents+="${parents:+ }$raw_parent"
+    normalized+="${normalized:+ }$parent"
+  done <<<"$output"
+  fc_mq_parents_available "$iface" "$normalized" || return 1
+  printf '%s\n' "$parents"
+}
+
+fc_mq_parents_available() {
+  local iface="$1" parents="$2" queue count=0 parent minor index
+  for queue in "/sys/class/net/$iface/queues"/tx-*; do
+    [[ -e "$queue" ]] && count=$((count + 1))
+  done
+  (( count > 0 )) || return 1
+  for parent in $parents; do
+    minor="${parent##*:}"
+    [[ "$parent" =~ ^:[[:xdigit:]]+$ ]] || return 1
+    (( 16#$minor >= 1 && 16#$minor <= count )) || return 1
+  done
+  for ((index = 1; index <= count; index++)); do
+    printf -v parent ':%x' "$index"
+    [[ " $parents " == *" $parent "* ]] || return 1
+  done
+}
+
+fc_mq_parent_sets_equal() {
+  local expected="$1" actual="$2" parent expected_count=0 actual_count=0
+  for parent in $expected; do
+    expected_count=$((expected_count + 1))
+    [[ " $actual " == *" $parent "* ]] || return 1
+  done
+  for parent in $actual; do actual_count=$((actual_count + 1)); done
+  (( expected_count == actual_count ))
+}
+
+fc_tc_snapshot_value() {
+  local key="$1"
+  awk -F= -v wanted="$key" '$1 == wanted {sub(/^[^=]*=/, ""); print; exit}' "$FC_QDISC_SNAPSHOT"
+}
+
+fc_tc_origin_kind() {
+  [[ -f "$FC_QDISC_SNAPSHOT" ]] || return 1
+  fc_tc_snapshot_value KIND
+}
+
+fc_tc_uses_mq_topology() {
+  [[ "$(fc_tc_desired_kind)" == fq && "$(fc_tc_origin_kind 2>/dev/null || true)" == mq ]]
+}
+
 fc_tc_desired_kind() {
   case "$QDISC_MODE" in
     cake) printf 'cake\n' ;;
@@ -53,7 +217,7 @@ fc_tc_desired_kind() {
 }
 
 fc_tc_plan() {
-  local iface="$1" kind
+  local iface="$1" kind root parents parent
   kind="$(fc_tc_desired_kind)"
   case "$kind" in
     cake) printf 'tc qdisc replace dev %q root cake bandwidth %smbit besteffort\n' "$iface" "$TOTAL_MBPS" ;;
@@ -67,7 +231,17 @@ fc_tc_plan() {
       fi
       ;;
     fq)
-      if [[ "$ROLE" == relay ]]; then
+      root="$(fc_root_qdisc "$iface" 2>/dev/null || true)"
+      if [[ "$root" == mq ]]; then
+        parents="$(fc_mq_leaf_parents "$iface" 2>/dev/null || true)"
+        for parent in $parents; do
+          if [[ "$ROLE" == relay ]]; then
+            printf 'tc qdisc replace dev %q parent %q fq maxrate %smbit\n' "$iface" "$parent" "$PER_FLOW_MBPS"
+          else
+            printf 'tc qdisc replace dev %q parent %q fq\n' "$iface" "$parent"
+          fi
+        done
+      elif [[ "$ROLE" == relay ]]; then
         printf 'tc qdisc replace dev %q root fq maxrate %smbit\n' "$iface" "$PER_FLOW_MBPS"
       else
         printf 'tc qdisc replace dev %q root fq\n' "$iface"
@@ -77,7 +251,7 @@ fc_tc_plan() {
 }
 
 fc_tc_snapshot() {
-  local iface="$1" kind temp fingerprint='' bands='' priomap=''
+  local iface="$1" kind temp fingerprint='' bands='' priomap='' parents=''
   if [[ -e "$FC_QDISC_SNAPSHOT" || -L "$FC_QDISC_SNAPSHOT" ]]; then
     fc_tc_snapshot_validate "$iface" || fc_die 'qdisc 快照无效，拒绝修改运行态。'
     return 0
@@ -88,6 +262,15 @@ fc_tc_snapshot() {
     [[ "$fingerprint" == "$FC_PFIFO_FAST_BANDS|$FC_PFIFO_FAST_PRIOMAP" ]] || return 1
     bands="${fingerprint%%|*}"
     priomap="${fingerprint#*|}"
+  elif [[ "$kind" == fq ]]; then
+    fingerprint="$(fc_fq_fingerprint "$iface")" || return 1
+    [[ "$fingerprint" == "$(fc_fq_default_fingerprint "$iface")" ]] || return 1
+  elif [[ "$kind" == mq ]]; then
+    fingerprint="$(fc_mq_fingerprint "$iface")" || return 1
+    parents="${fingerprint%%|*}"
+    fingerprint="${fingerprint#*|}"
+    fc_mq_parents_available "$iface" "$parents" || return 1
+    [[ "$fingerprint" == "$(fc_fq_default_fingerprint "$iface")" ]] || return 1
   fi
   mkdir -p "$FC_STATE_DIR"
   temp="$(mktemp "$FC_STATE_DIR/.qdisc-snapshot.XXXXXX")"
@@ -97,6 +280,11 @@ fc_tc_snapshot() {
     if [[ "$kind" == pfifo_fast ]]; then
       printf 'BANDS=%s\n' "$bands"
       printf 'PRIOMAP=%s\n' "$priomap"
+    elif [[ "$kind" == fq ]]; then
+      printf 'FQ_FINGERPRINT=%s\n' "$fingerprint"
+    elif [[ "$kind" == mq ]]; then
+      printf 'MQ_PARENTS=%s\n' "$parents"
+      printf 'FQ_FINGERPRINT=%s\n' "$fingerprint"
     fi
   } >"$temp"
   fc_atomic_replace "$temp" "$FC_QDISC_SNAPSHOT" 0600
@@ -104,8 +292,8 @@ fc_tc_snapshot() {
 }
 
 fc_tc_snapshot_validate() {
-  local expected_iface="${1:-}" iface='' kind='' bands='' priomap='' key value
-  local iface_seen=0 kind_seen=0 bands_seen=0 priomap_seen=0 invalid=0
+  local expected_iface="${1:-}" iface='' kind='' bands='' priomap='' fq_fingerprint='' mq_parents='' key value parent
+  local iface_seen=0 kind_seen=0 bands_seen=0 priomap_seen=0 fingerprint_seen=0 parents_seen=0 invalid=0
   [[ -f "$FC_QDISC_SNAPSHOT" && -r "$FC_QDISC_SNAPSHOT" ]] || {
     fc_warn 'qdisc 快照不可读或不是普通文件。'
     return 1
@@ -132,6 +320,16 @@ fc_tc_snapshot_validate() {
         priomap="$value"
         priomap_seen=1
         ;;
+      FQ_FINGERPRINT)
+        (( fingerprint_seen == 0 )) || invalid=1
+        fq_fingerprint="$value"
+        fingerprint_seen=1
+        ;;
+      MQ_PARENTS)
+        (( parents_seen == 0 )) || invalid=1
+        mq_parents="$value"
+        parents_seen=1
+        ;;
       *) invalid=1 ;;
     esac
   done <"$FC_QDISC_SNAPSHOT"
@@ -145,18 +343,43 @@ fc_tc_snapshot_validate() {
   }
   case "$kind" in
     none|noqueue)
-      (( bands_seen == 0 && priomap_seen == 0 )) || {
+      (( bands_seen == 0 && priomap_seen == 0 && fingerprint_seen == 0 && parents_seen == 0 )) || {
         fc_warn '简单 qdisc 快照包含多余参数。'
         return 1
       }
       return 0
       ;;
     pfifo_fast)
-      if (( bands_seen != 1 || priomap_seen != 1 )) ||
+      if (( bands_seen != 1 || priomap_seen != 1 || fingerprint_seen != 0 || parents_seen != 0 )) ||
         [[ "$bands" != "$FC_PFIFO_FAST_BANDS" || "$priomap" != "$FC_PFIFO_FAST_PRIOMAP" ]]; then
         fc_warn 'pfifo_fast 快照缺少标准且可重放的参数指纹。'
         return 1
       fi
+      return 0
+      ;;
+    fq)
+      if (( fingerprint_seen != 1 || bands_seen != 0 || priomap_seen != 0 || parents_seen != 0 )) ||
+        [[ -z "$fq_fingerprint" || "$fq_fingerprint" == *$'\n'* ||
+          ! "$fq_fingerprint" =~ ^[[:alnum:]_.:/\ -]+$ ]]; then
+        fc_warn 'fq 快照缺少安全且可验证的默认参数指纹。'
+        return 1
+      fi
+      return 0
+      ;;
+    mq)
+      if (( fingerprint_seen != 1 || parents_seen != 1 || bands_seen != 0 || priomap_seen != 0 )) ||
+        [[ -z "$fq_fingerprint" || ! "$fq_fingerprint" =~ ^[[:alnum:]_.:/\ -]+$ || -z "$mq_parents" ]]; then
+        fc_warn 'mq 快照缺少父队列或默认 fq 指纹。'
+        return 1
+      fi
+      local seen_parents=' '
+      for parent in $mq_parents; do
+        [[ "$parent" =~ ^[[:xdigit:]]*:[[:xdigit:]]+$ && "$seen_parents" != *" $parent "* ]] || {
+          fc_warn 'mq 快照包含无效或重复父队列。'
+          return 1
+        }
+        seen_parents+="$parent "
+      done
       return 0
       ;;
     *) fc_warn "快照包含不可恢复的 qdisc：$kind"; return 1 ;;
@@ -164,7 +387,7 @@ fc_tc_snapshot_validate() {
 }
 
 fc_tc_restore() {
-  local iface kind actual bands priomap fingerprint
+  local iface kind actual bands priomap fingerprint expected parents leaf_parents
   if [[ ! -e "$FC_QDISC_SNAPSHOT" ]]; then
     [[ -e "$FC_MANAGED_STATE" ]] && { fc_warn 'qdisc 已托管但快照缺失。'; return 1; }
     fc_warn '没有 qdisc 快照。'
@@ -191,6 +414,60 @@ fc_tc_restore() {
         return 1
       }
       [[ "$fingerprint" == "$bands|$priomap" ]] && return 0
+      actual="${fingerprint:-unknown}"
+      ;;
+    fq)
+      expected="$(fc_tc_snapshot_value FQ_FINGERPRINT)"
+      [[ "$expected" == "$(fc_fq_default_fingerprint "$iface")" ]] || {
+        fc_warn '当前内核无法按快照重建默认 fq；拒绝修改 qdisc。'
+        return 1
+      }
+      tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
+      tc qdisc replace dev "$iface" root fq || {
+        fc_warn '无法重建默认 fq qdisc。'
+        return 1
+      }
+      fingerprint="$(fc_fq_fingerprint "$iface")" || {
+        fc_warn '无法读取 fq 恢复结果。'
+        return 1
+      }
+      [[ "$fingerprint" == "$expected" ]] && return 0
+      actual="${fingerprint:-unknown}"
+      ;;
+    mq)
+      parents="$(fc_tc_snapshot_value MQ_PARENTS)"
+      expected="$parents|$(fc_tc_snapshot_value FQ_FINGERPRINT)"
+      fc_mq_parents_available "$iface" "$parents" || {
+        fc_warn '当前网卡 TX queue 无法覆盖 mq 快照中的父队列。'
+        return 1
+      }
+      [[ "${expected#*|}" == "$(fc_fq_default_fingerprint "$iface")" ]] || {
+        fc_warn '当前内核无法按快照重建 mq 的默认 fq 叶子；拒绝修改 qdisc。'
+        return 1
+      }
+      tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
+      tc qdisc replace dev "$iface" root mq || {
+        fc_warn '无法重建 mq root qdisc。'
+        return 1
+      }
+      leaf_parents="$(fc_mq_leaf_parents "$iface")" || {
+        fc_warn '无法读取重建后的 mq 叶子。'
+        return 1
+      }
+      for parent in $leaf_parents; do
+        tc qdisc replace dev "$iface" parent "$parent" fq || {
+          fc_warn '无法重建 mq 的默认 fq 叶子。'
+          return 1
+        }
+      done
+      fingerprint="$(fc_mq_fingerprint "$iface")" || {
+        fc_warn '无法读取 mq 恢复结果。'
+        return 1
+      }
+      if fc_mq_parent_sets_equal "$parents" "${fingerprint%%|*}" &&
+        [[ "${fingerprint#*|}" == "${expected#*|}" ]]; then
+        return 0
+      fi
       actual="${fingerprint:-unknown}"
       ;;
   esac
@@ -227,8 +504,23 @@ fc_tc_abort() {
 }
 
 fc_tc_apply_iface() {
-  local iface="$1" kind
+  local iface="$1" kind parents parent
   kind="$(fc_tc_desired_kind)"
+  if [[ "$kind" == fq ]] && fc_tc_uses_mq_topology; then
+    parents="$(fc_tc_snapshot_value MQ_PARENTS)"
+    fc_mq_parents_available "$iface" "$parents" || return 1
+    tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
+    tc qdisc replace dev "$iface" root mq || return 1
+    parents="$(fc_mq_leaf_parents "$iface")" || return 1
+    for parent in $parents; do
+      if [[ "$ROLE" == relay ]]; then
+        tc qdisc replace dev "$iface" parent "$parent" fq maxrate "${PER_FLOW_MBPS}mbit" || return 1
+      else
+        tc qdisc replace dev "$iface" parent "$parent" fq || return 1
+      fi
+    done
+    return 0
+  fi
   tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
   case "$kind" in
     cake)
@@ -279,12 +571,13 @@ fc_tc_apply() {
 }
 
 fc_managed_state_write() {
-  local iface="$1" temp
+  local iface="$1" temp actual
+  actual="$(fc_root_qdisc "$iface")" || return 1
   mkdir -p "$FC_STATE_DIR"
   temp="$(mktemp "$FC_STATE_DIR/.managed.XXXXXX")"
   {
     printf 'IFACE=%s\n' "$iface"
-    printf 'QDISC=%s\n' "$(fc_tc_desired_kind)"
+    printf 'QDISC=%s\n' "$actual"
     printf 'ROLE=%s\n' "$ROLE"
     printf 'PER_FLOW_MBPS=%s\n' "$PER_FLOW_MBPS"
     printf 'TOTAL_MBPS=%s\n' "$TOTAL_MBPS"
@@ -331,10 +624,15 @@ fc_managed_state_load() {
     fc_warn '托管状态中的 qdisc 模式与总带宽不一致。'
     return 1
   fi
-  [[ "$qdisc" == "$expected" ]] || {
+  if [[ "$qdisc" == mq && "$expected" == fq ]]; then
+    [[ "$(fc_tc_origin_kind 2>/dev/null || true)" == mq ]] || {
+      fc_warn '托管状态声明 mq，但首次接管快照不匹配。'
+      return 1
+    }
+  elif [[ "$qdisc" != "$expected" ]]; then
     fc_warn '托管状态中的 qdisc 与配置字段不一致。'
     return 1
-  }
+  fi
   FC_MANAGED_IFACE="$iface"
   FC_MANAGED_QDISC="$qdisc"
   FC_MANAGED_ROLE="$role"
@@ -395,10 +693,14 @@ fc_tc_rate_matches() {
 }
 
 fc_tc_verify() {
-  local iface="$1" expected actual qdiscs classes root_line leaf_line class_line
+  local iface="$1" expected actual qdiscs classes root_line leaf_line class_line parents parent line seen='' root_count=0
   expected="$(fc_tc_desired_kind)"
   actual="$(fc_root_qdisc "$iface")"
-  [[ "$actual" == "$expected" ]] || return 1
+  if [[ "$expected" == fq ]] && fc_tc_uses_mq_topology; then
+    [[ "$actual" == mq ]] || return 1
+  else
+    [[ "$actual" == "$expected" ]] || return 1
+  fi
   qdiscs="$(tc qdisc show dev "$iface" 2>/dev/null)" || return 1
   case "$expected" in
     cake)
@@ -421,6 +723,28 @@ fc_tc_verify() {
       else [[ "$leaf_line" != *' maxrate '* ]]; fi
       ;;
     fq)
+      if fc_tc_uses_mq_topology; then
+        parents="$(fc_tc_snapshot_value MQ_PARENTS)"
+        while IFS= read -r line; do
+          [[ -n "$line" ]] || continue
+          if [[ "$line" =~ ^qdisc[[:space:]]+mq[[:space:]]+[^[:space:]]+[[:space:]]+root([[:space:]]|$) ]]; then
+            root_count=$((root_count + 1))
+          elif [[ "$line" =~ ^qdisc[[:space:]]+fq[[:space:]]+[^[:space:]]+[[:space:]]+parent[[:space:]]+([^[:space:]]+) ]]; then
+            leaf_line="$line"
+            parent=":${BASH_REMATCH[1]##*:}"
+            [[ " $parents " == *" $parent "* && " $seen " != *" $parent "* ]] || return 1
+            if [[ "$ROLE" == relay ]]; then fc_tc_rate_matches "$leaf_line" maxrate "$PER_FLOW_MBPS" || return 1
+            elif [[ "$leaf_line" == *' maxrate '* ]]; then return 1
+            fi
+            seen+="${seen:+ }$parent"
+          else
+            return 1
+          fi
+        done <<<"$qdiscs"
+        fc_mq_parent_sets_equal "$parents" "$seen" || return 1
+        (( root_count == 1 )) || return 1
+        return 0
+      fi
       root_line="$(awk '$1 == "qdisc" && $2 == "fq" && $0 ~ / root / {print; exit}' <<<"$qdiscs")"
       [[ -n "$root_line" ]] || return 1
       if [[ "$ROLE" == relay ]]; then fc_tc_rate_matches "$root_line" maxrate "$PER_FLOW_MBPS"
@@ -447,13 +771,13 @@ fc_tc_off() {
   fc_assert_qdisc_takeover_safe "$iface"
   fc_tc_transaction_begin "$iface" || fc_die '无法建立 qdisc 事务基线。'
   fc_tc_snapshot "$iface"
-  if ! tc qdisc replace dev "$iface" root fq; then
-    fc_tc_abort || fc_die 'qdisc 关闭失败且恢复不完整；快照已保留。'
-    fc_die 'qdisc 关闭失败，已恢复事务前状态。'
-  fi
   QDISC_MODE=fq
   TOTAL_MBPS=0
   ROLE=general
+  if ! fc_tc_apply_iface "$iface"; then
+    fc_tc_abort || fc_die 'qdisc 关闭失败且恢复不完整；快照已保留。'
+    fc_die 'qdisc 关闭失败，已恢复事务前状态。'
+  fi
   if ! fc_tc_verify "$iface"; then
     fc_tc_abort || fc_die 'qdisc 关闭后验证失败且恢复不完整；快照已保留。'
     fc_die 'qdisc 关闭后验证失败，已恢复事务前状态。'

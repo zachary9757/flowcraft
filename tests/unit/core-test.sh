@@ -208,6 +208,62 @@ if (
 ); then fail 'non-standard pfifo_fast was accepted'; fi
 pass 'non-standard pfifo_fast fails closed'
 
+standard_fq='qdisc fq 0: root refcnt 2 limit 10000p flow_limit 100p buckets 1024 orphan_mask 1023 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1 weights 589824 196608 65536 quantum 3028b initial_quantum 15140b low_rate_threshold 550Kbit refill_delay 40ms timer_slack 10us horizon 10s horizon_drop offload_horizon 0us'
+standard_fq_fingerprint="${standard_fq#* refcnt 2 }"
+standard_mq="qdisc mq 0: root
+qdisc fq 0: parent :1 ${standard_fq_fingerprint}
+qdisc fq 0: parent :2 ${standard_fq_fingerprint}"
+assert_eq "$(fc_fq_line_fingerprint "$standard_fq")" "$standard_fq_fingerprint" \
+  'fq fingerprint removes only volatile root metadata'
+assert_eq "$(fc_fq_line_fingerprint "qdisc fq 0: parent :1 $standard_fq_fingerprint")" \
+  "$standard_fq_fingerprint" 'fq fingerprint handles mq leaves'
+
+if ! (
+  fc_root_qdisc() { printf 'fq\n'; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\n' "$standard_fq"; }
+  fc_assert_qdisc_takeover_safe eth0
+); then fail 'kernel-default fq was rejected'; fi
+pass 'kernel-default fq is safe for first takeover'
+
+if (
+  fc_root_qdisc() { printf 'fq\n'; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s maxrate 500Mbit\n' "$standard_fq"; }
+  fc_assert_qdisc_takeover_safe eth0 >/dev/null 2>&1
+); then fail 'custom fq was accepted'; fi
+pass 'custom fq fails closed'
+
+assert_eq "$(tc() { printf '%s\n' "$standard_mq"; }; fc_mq_fingerprint eth0)" \
+  ":1 :2|$standard_fq_fingerprint" 'mq fingerprint preserves parents and common fq defaults'
+
+if ! (
+  fc_root_qdisc() { printf 'mq\n'; }
+  fc_mq_parents_available() { :; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\n' "$standard_mq"; }
+  fc_assert_qdisc_takeover_safe eth0
+); then fail 'standard mq plus fq leaves was rejected'; fi
+pass 'standard mq plus fq leaves is safe for first takeover'
+
+if (
+  fc_root_qdisc() { printf 'mq\n'; }
+  fc_mq_parents_available() { :; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\nqdisc cake 10: parent :2 bandwidth 1Gbit\n' "$standard_mq"; }
+  fc_assert_qdisc_takeover_safe eth0 >/dev/null 2>&1
+); then fail 'mq with an extra non-fq leaf was accepted'; fi
+pass 'mq with non-default leaves fails closed'
+
+if (
+  fc_root_qdisc() { printf 'mq\n'; }
+  fc_mq_parents_available() { return 1; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\n' "$standard_mq"; }
+  fc_assert_qdisc_takeover_safe eth0 >/dev/null 2>&1
+); then fail 'mq with incomplete TX queue coverage was accepted'; fi
+pass 'mq takeover requires complete TX queue coverage'
+
 rm -f "$FC_QDISC_SNAPSHOT"
 if (fc_root_qdisc() { return 1; }; fc_tc_snapshot eth0 >/dev/null 2>&1); then
   fail 'qdisc snapshot recorded an unreadable root state as none'
@@ -239,6 +295,119 @@ if ! (
 ); then fail 'standard pfifo_fast snapshot was not restored'; fi
 [[ -e "$pfifo_restore_marker" ]] || fail 'pfifo_fast restore did not invoke tc replace'
 pass 'pfifo_fast restore is rebuilt and fingerprint-verified'
+rm -f "$FC_QDISC_SNAPSHOT"
+
+(
+  fc_root_qdisc() { printf 'fq\n'; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\n' "$standard_fq"; }
+  fc_tc_snapshot eth0
+)
+grep -Fxq 'KIND=fq' "$FC_QDISC_SNAPSHOT" || fail 'fq kind was not snapshotted'
+grep -Fxq "FQ_FINGERPRINT=$standard_fq_fingerprint" "$FC_QDISC_SNAPSHOT" || fail 'fq fingerprint was not snapshotted'
+pass 'default fq snapshot preserves its complete fingerprint'
+
+fq_restore_marker="$task_tmp/fq-restored"
+fq_restore_record="$task_tmp/fq-restore-record"
+if ! (
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() {
+    printf '%s\n' "$*" >>"$fq_restore_record"
+    if [[ "$*" == 'qdisc replace dev eth0 root fq' ]]; then touch "$fq_restore_marker"
+    elif [[ "$*" == '-d qdisc show dev eth0' ]]; then printf '%s\n' "$standard_fq"
+    fi
+  }
+  fc_tc_restore
+); then fail 'default fq snapshot was not restored'; fi
+[[ -e "$fq_restore_marker" ]] || fail 'fq restore did not invoke tc replace'
+[[ "$(sed -n '1p' "$fq_restore_record")" == 'qdisc del dev eth0 root' ]] || fail 'fq restore did not remove stale parameters first'
+pass 'default fq restore is fingerprint-verified'
+rm -f "$FC_QDISC_SNAPSHOT"
+
+(
+  fc_root_qdisc() { printf 'mq\n'; }
+  fc_mq_parents_available() { :; }
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  tc() { printf '%s\n' "$standard_mq"; }
+  fc_tc_snapshot eth0
+)
+grep -Fxq 'KIND=mq' "$FC_QDISC_SNAPSHOT" || fail 'mq kind was not snapshotted'
+grep -Fxq 'MQ_PARENTS=:1 :2' "$FC_QDISC_SNAPSHOT" || fail 'mq parents were not snapshotted'
+pass 'mq snapshot preserves parents and default fq fingerprint'
+
+mq_restore_marker="$task_tmp/mq-restored"
+mq_restore_record="$task_tmp/mq-restore-record"
+if ! (
+  fc_fq_default_fingerprint() { printf '%s\n' "$standard_fq_fingerprint"; }
+  fc_mq_parents_available() { :; }
+  tc() {
+    printf '%s\n' "$*" >>"$mq_restore_record"
+    if [[ "$*" == 'qdisc replace dev eth0 root mq' ]]; then touch "$mq_restore_marker"
+    elif [[ "$*" == 'qdisc show dev eth0' ]]; then printf '%s\n' "$standard_mq"
+    elif [[ "$*" == '-d qdisc show dev eth0' ]]; then printf '%s\n' "$standard_mq"
+    fi
+  }
+  fc_tc_restore
+); then fail 'mq snapshot was not restored'; fi
+[[ -e "$mq_restore_marker" ]] || fail 'mq restore did not invoke tc replace'
+[[ "$(sed -n '1p' "$mq_restore_record")" == 'qdisc del dev eth0 root' ]] || fail 'mq restore did not rebuild the root'
+grep -Fxq 'qdisc replace dev eth0 parent :1 fq' "$mq_restore_record" || fail 'mq parent :1 was not explicitly restored'
+grep -Fxq 'qdisc replace dev eth0 parent :2 fq' "$mq_restore_record" || fail 'mq parent :2 was not explicitly restored'
+pass 'mq restore rebuilds and verifies all default fq leaves'
+
+if ! fc_mq_parent_sets_equal ':1 :2' ':2 :1'; then
+  fail 'mq parent comparison depended on tc output order'
+fi
+pass 'mq restore compares parent sets independently of output order'
+
+cat >"$FC_MANAGED_STATE" <<'EOF'
+IFACE=eth0
+QDISC=mq
+ROLE=relay
+PER_FLOW_MBPS=430
+TOTAL_MBPS=0
+QDISC_MODE=auto
+EOF
+if ! fc_managed_state_load; then fail 'managed mq state was rejected'; fi
+assert_eq "$FC_MANAGED_QDISC" mq 'managed state records preserved mq topology'
+rm -f "$FC_MANAGED_STATE"
+
+mq_apply_record="$task_tmp/mq-apply-record"
+if ! (
+  ROLE=relay PER_FLOW_MBPS=430 TOTAL_MBPS=0 QDISC_MODE=auto
+  fc_root_qdisc() { printf 'mq\n'; }
+  fc_mq_parents_available() { :; }
+  tc() {
+    printf '%s\n' "$*" >>"$mq_apply_record"
+    if [[ "$*" == 'qdisc show dev eth0' ]]; then
+      printf 'qdisc mq 8002: root\nqdisc fq_codel 0: parent 8002:2\nqdisc fq_codel 0: parent 8002:1\n'
+    fi
+  }
+  fc_tc_apply_iface eth0
+); then fail 'mq leaf apply failed'; fi
+grep -Fxq 'qdisc replace dev eth0 parent 8002:1 fq maxrate 430mbit' "$mq_apply_record" || fail 'mq parent :1 was not updated'
+grep -Fxq 'qdisc replace dev eth0 parent 8002:2 fq maxrate 430mbit' "$mq_apply_record" || fail 'mq parent :2 was not updated'
+pass 'fq policy preserves mq and updates every leaf'
+
+if ! (
+  ROLE=relay PER_FLOW_MBPS=430 TOTAL_MBPS=0 QDISC_MODE=auto
+  fc_root_qdisc() { printf 'mq\n'; }
+  tc() {
+    printf 'qdisc mq 8002: root\nqdisc fq 10: parent 8002:1 maxrate 430Mbit\nqdisc fq 20: parent 8002:2 maxrate 430Mbit\n'
+  }
+  fc_tc_verify eth0
+); then fail 'managed mq plus fq leaves was not verified'; fi
+pass 'mq verification checks every managed fq leaf'
+
+if (
+  ROLE=relay PER_FLOW_MBPS=430 TOTAL_MBPS=0 QDISC_MODE=auto
+  fc_root_qdisc() { printf 'mq\n'; }
+  tc() {
+    printf 'qdisc mq 8002: root\nqdisc fq 10: parent 8002:1 maxrate 430Mbit\nqdisc fq 20: parent 8002:2 maxrate 430Mbit\nqdisc cake 30: parent 8002:3 bandwidth 1Gbit\n'
+  }
+  fc_tc_verify eth0
+); then fail 'mq verification ignored an extra non-fq leaf'; fi
+pass 'mq verification rejects unexpected qdiscs'
 rm -f "$FC_QDISC_SNAPSHOT"
 
 printf 'IFACE=eth0\nKIND=noqueue\n' >"$FC_QDISC_SNAPSHOT"

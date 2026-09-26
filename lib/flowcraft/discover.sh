@@ -112,6 +112,14 @@ fc_assert_qdisc_takeover_safe() {
       fc_pfifo_fast_is_standard "$iface" ||
         fc_die 'pfifo_fast 参数不是可精确恢复的标准指纹，拒绝接管。'
       ;;
+    fq)
+      fc_fq_is_standard "$iface" ||
+        fc_die 'fq 不是当前内核可精确重建的裸默认指纹，拒绝接管。'
+      ;;
+    mq)
+      fc_mq_is_standard "$iface" ||
+        fc_die 'mq 拓扑不是可精确恢复的默认 fq 叶子结构，拒绝接管。'
+      ;;
     *) fc_die "拒绝接管未受支持或未托管的 root qdisc：$kind" ;;
   esac
 }

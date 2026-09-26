@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.2 - 2026-09-26
+
+- Added fail-closed takeover of kernel-default `fq` using a same-kernel,
+  same-MTU disposable probe and complete parameter fingerprints.
+- Added safe support for `mq` roots whose leaves are all kernel-default `fq`;
+  unshaped policies retain `mq` and explicitly update every transmit-queue
+  leaf without depending on the host's `net.core.default_qdisc`.
+- `fq` and `mq` rollback now rebuild qdiscs before verifying the saved
+  topology and parameters, preventing stale options such as `maxrate` from
+  surviving a restore.
+- Non-default `fq`, mixed `mq` leaves, extra qdiscs, probe failures, and
+  topology drift remain rejected before takeover.
+
 ## 0.2.1 - 2026-09-26
 
 - Added fail-closed takeover of standard `pfifo_fast` root qdiscs.
