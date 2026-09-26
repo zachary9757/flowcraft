@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3 - 2026-09-26
+
+- Added `flowcraft uninstall` and menu option 7, both delegating to the same
+  fail-closed uninstaller used by `install.sh --uninstall`.
+- Managed installations now retain a trusted installer helper so uninstall can
+  require rollback before removing binaries, configuration, or recovery state.
+- Reworked the README around completed capabilities, transaction boundaries,
+  role-specific tuning, buffer calculations, qdisc takeover, and safe removal.
+- Updated uninstall tests to exercise the real CLI dispatch without redefining
+  functions after use, satisfying ShellCheck `SC2218` on GitHub Actions.
+
 ## 0.2.2 - 2026-09-26
 
 - Added fail-closed takeover of kernel-default `fq` using a same-kernel,

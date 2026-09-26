@@ -5,7 +5,7 @@ FlowCraft 是面向 Linux VPS 的声明式网络调优与出口队列管理工�
 Network Owner（单一网络配置所有者）**，避免多套脚本相互覆盖、重复调参或留下
 无法恢复的运行态。
 
-当前版本：`0.2.2`。
+当前版本：`0.2.3`。
 
 ## 已完成功能
 
@@ -102,7 +102,7 @@ sudo flowcraft
 或裸 `tc` 写入逻辑。
 
 ```text
-FlowCraft 0.2.2
+FlowCraft 0.2.3
   BBR: active    qdisc: fq          Managed: yes
   Interface: eth0        Link: 1000 Mbps
 
