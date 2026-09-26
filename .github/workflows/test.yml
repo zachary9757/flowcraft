@@ -12,6 +12,6 @@ jobs:
       - name: Tests
         run: bash tests/run.sh
       - name: ShellCheck
-        run: shellcheck --severity=error install.sh bin/* lib/flowcraft/*.sh tests/*.sh tests/unit/*.sh
+        run: shellcheck --severity=error install.sh quick-install.sh bin/* lib/flowcraft/*.sh tests/*.sh tests/unit/*.sh
       - name: Network namespace integration
         run: sudo bash tests/integration/network-namespace.sh

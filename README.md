@@ -37,6 +37,24 @@ flowcraft version
 旧版用户必须在替换程序前先使用原版本执行 `sudo ftcp rollback`，并备份后移走
 `/etc/flowcraft` 与 `/var/lib/flowcraft`；新版检测到旧快照时会 fail-closed，拒绝修改网络。
 
+全新 Linux VPS 可使用一键安装。脚本固定下载 `v0.1.0` Tag 对应的提交，检测到
+无法确认版本的旧配置或状态时会拒绝覆盖；安装后只运行 `inspect` 和 `plan`，
+**不会执行 `apply` 或修改网络运行态**：
+
+```bash
+curl -fsSL --proto '=https' https://raw.githubusercontent.com/zachary9757/flowcraft/main/quick-install.sh | sudo bash
+```
+
+如需先审阅脚本，可下载后再运行：
+
+```bash
+curl -fLo quick-install.sh https://raw.githubusercontent.com/zachary9757/flowcraft/main/quick-install.sh
+less quick-install.sh
+sudo bash quick-install.sh
+```
+
+已克隆仓库时仍可直接安装：
+
 ```bash
 sudo ./install.sh
 sudo flowcraft inspect
@@ -44,7 +62,7 @@ sudo flowcraft plan
 sudo flowcraft apply
 ```
 
-安装本身不会修改网络。默认配置位于 `/etc/flowcraft/config.conf`：
+两种安装方式本身都不会修改网络。默认配置位于 `/etc/flowcraft/config.conf`：
 
 ```text
 ROLE=general
