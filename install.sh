@@ -140,6 +140,7 @@ install_flowcraft() {
   ln -sfn "$install_bin" /usr/local/bin/flowcraft
   ln -sfn "$install_bin" /usr/local/bin/ftcp
   install -m 0644 "$source_root"/lib/flowcraft/*.sh "$install_lib/"
+  install -m 0755 "$source_root/install.sh" "$install_lib/install.sh"
   install -m 0644 "$source_root/packaging/systemd/flowcraft.service" "$service_file"
   if [[ ! -e "$config_dir/config.conf" && ! -L "$config_dir/config.conf" ]]; then
     install -m 0600 "$source_root/config/flowcraft.conf.example" "$config_dir/config.conf"

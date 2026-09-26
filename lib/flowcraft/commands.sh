@@ -14,8 +14,20 @@ Usage: flowcraft [COMMAND]
   tc status|apply|off                      manage the selected egress qdisc
   fit probe --peer HOST [options]          explicit iperf3 measurement
   rollback                                 restore the pre-apply snapshot
+  uninstall                                rollback if needed and remove FlowCraft
   version
 EOF
+}
+
+fc_uninstall() {
+  local installer="$FC_INSTALL_LIB/install.sh" repo_installer
+  if [[ ! -f "$installer" || ! -r "$installer" || -L "$installer" ]]; then
+    repo_installer="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/install.sh"
+    installer="$repo_installer"
+  fi
+  [[ -f "$installer" && -r "$installer" && ! -L "$installer" ]] ||
+    fc_die '未找到可信的 FlowCraft 卸载脚本；请重新下载 install.sh 并运行 --uninstall。'
+  bash "$installer" --uninstall
 }
 
 fc_main() {
@@ -51,6 +63,7 @@ fc_main() {
       fc_fit_probe "$@"
       ;;
     rollback) (($# == 0)) || fc_die 'rollback 不接受参数。'; fc_rollback ;;
+    uninstall) (($# == 0)) || fc_die 'uninstall 不接受参数。'; fc_uninstall ;;
     *) fc_die "未知命令：$command" ;;
   esac
 }

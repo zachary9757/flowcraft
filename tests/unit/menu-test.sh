@@ -63,3 +63,33 @@ fc_menu() { touch "$menu_marker"; }
 fc_main
 [[ -e "$menu_marker" ]] || { printf 'FAIL: no-argument CLI did not open menu\n' >&2; exit 1; }
 printf 'PASS: no-argument CLI dispatches to the menu\n'
+
+uninstall_marker="$task_tmp/uninstall"
+fc_main() {
+  [[ ${1:-} == uninstall ]] || return 1
+  touch "$uninstall_marker"
+}
+if printf 'n\n' | fc_menu_uninstall >/dev/null; then
+  printf 'FAIL: cancelled menu uninstall reported success\n' >&2
+  exit 1
+fi
+[[ ! -e "$uninstall_marker" ]] || { printf 'FAIL: cancelled menu uninstall ran uninstall\n' >&2; exit 1; }
+printf 'y\n' | fc_menu_uninstall >/dev/null
+[[ -e "$uninstall_marker" ]] || { printf 'FAIL: confirmed menu uninstall did not dispatch\n' >&2; exit 1; }
+printf 'PASS: menu uninstall requires confirmation and dispatches once confirmed\n'
+
+installer_dir="$task_tmp/install-lib"
+installer_marker="$task_tmp/installer-argument"
+mkdir -p "$installer_dir"
+cat >"$installer_dir/install.sh" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\${1:-}" >'$installer_marker'
+EOF
+chmod 0755 "$installer_dir/install.sh"
+FC_INSTALL_LIB="$installer_dir"
+fc_uninstall
+grep -Fxq -- '--uninstall' "$installer_marker" || {
+  printf 'FAIL: CLI uninstall did not invoke the installed helper with --uninstall\n' >&2
+  exit 1
+}
+printf 'PASS: CLI uninstall delegates to the installed safe uninstaller\n'

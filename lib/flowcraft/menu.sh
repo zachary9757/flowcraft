@@ -134,6 +134,16 @@ fc_menu_rollback() {
   esac
 }
 
+fc_menu_uninstall() {
+  local answer
+  printf '确认完全卸载 FlowCraft？托管状态会先要求安全回滚。[y/N] '
+  IFS= read -r answer || answer=''
+  case "$answer" in
+    y|Y|yes|YES) (fc_main uninstall) ;;
+    *) fc_info '已取消卸载。'; return 1 ;;
+  esac
+}
+
 fc_menu() {
   local choice
   fc_menu_colors
@@ -146,8 +156,9 @@ fc_menu() {
     printf '%s[4]%s 查看执行计划（Plan / Dry-Run）\n' "$FC_MENU_CYAN" "$FC_MENU_RESET"
     printf '%s[5]%s 实时连接与丢包监控（Monitor）\n' "$FC_MENU_CYAN" "$FC_MENU_RESET"
     printf '%s[6]%s 回滚到首次接管前状态（Rollback）\n' "$FC_MENU_CYAN" "$FC_MENU_RESET"
+    printf '%s[7]%s 安全回滚并完全卸载（Uninstall）\n' "$FC_MENU_CYAN" "$FC_MENU_RESET"
     printf '%s[0]%s 退出\n\n' "$FC_MENU_CYAN" "$FC_MENU_RESET"
-    printf '请选择 [0-6]：'
+    printf '请选择 [0-7]：'
     IFS= read -r choice || return 0
     case "$choice" in
       1) (fc_menu_apply_profile general 'General') || true ;;
@@ -156,8 +167,9 @@ fc_menu() {
       4) (fc_main plan) || true ;;
       5) (fc_main mon --watch 2) || true ;;
       6) fc_menu_rollback || true ;;
+      7) if fc_menu_uninstall; then return 0; fi ;;
       0) return 0 ;;
-      *) fc_warn '无效选项，请输入 0-6。' ;;
+      *) fc_warn '无效选项，请输入 0-7。' ;;
     esac
   done
 }
