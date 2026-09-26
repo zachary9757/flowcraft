@@ -1,6 +1,5 @@
-# Upstream source snapshots used by Flowcraft 0.5.0
-
-Actions-bbr-v3 https://github.com/byJoey/Actions-bbr-v3 c13d9ef51b7be6b167103952ff08bfff2b844054
+# Research baselines for the FlowCraft rewrite (2026-09-25)
+Actions-bbr-v3 https://github.com/byJoey/Actions-bbr-v3 22ebda7be4fdca46eb2068bb14056579dac2ee6d
 tcp-dashboard https://github.com/666shen/tcp-dashboard 39e0d7fd1e179805cd3fe066f27b1ec899401845
-netshape-manager https://github.com/bear4f/netshape-manager 0489e8d4b70e350dbda27bd3553c3a963fd2425f
-tcpfit https://github.com/Kylin010/tcpfit 67c0bdfb35dd98e86982600298237b6ecc08ebe4
+netshape-manager https://github.com/bear4f/netshape-manager 647b454b934349a179b1db289518eb9280adc839
+tcpfit https://github.com/Kylin010/tcpfit 76331588af487a973d3445a1bf8bba7037d566ca

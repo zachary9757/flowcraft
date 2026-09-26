@@ -1,0 +1,12 @@
+[Unit]
+Description=FlowCraft managed network state
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/flowcraft apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

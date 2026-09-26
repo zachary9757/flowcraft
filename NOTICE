@@ -1,26 +1,3 @@
-Flowcraft contains adapted work from the following MIT-licensed projects:
-
-- Actions-bbr-v3, copyright its contributors
-  https://github.com/byJoey/Actions-bbr-v3
-  Kernel patches, kernel configuration policy, and build helpers are adapted
-  from commit c13d9ef51b7be6b167103952ff08bfff2b844054.
-
-- tcp-dashboard, copyright its contributors
-  https://github.com/666shen/tcp-dashboard
-  IPv4 address-selection and RPS/RFS concepts are adapted from commit
-  39e0d7fd1e179805cd3fe066f27b1ec899401845. The upstream script itself is not
-  embedded because that snapshot does not pass Bash syntax validation.
-
-- NetShape Manager, copyright its contributors
-  https://github.com/bear4f/netshape-manager
-  Role profiles, BDP buffer sizing, qdisc fallback, diagnostics, and rollback
-  concepts are adapted from commit 0489e8d4b70e350dbda27bd3553c3a963fd2425f.
-
-- tcpfit, Copyright (c) 2026 Kylin010
-  https://github.com/Kylin010/tcpfit
-  Memory-aware TCP buffer headroom, public peer discovery, port rotation,
-  policer-loss classification, coarse/fine knee measurement, and rate-margin
-  policy are adapted from commit 67c0bdfb35dd98e86982600298237b6ecc08ebe4.
-  Its complete MIT license is preserved in THIRD_PARTY_LICENSES/tcpfit-MIT.txt.
-
-The full Flowcraft distribution is provided under the repository MIT License.
+FlowCraft is a clean-room rewrite informed by public behavior and documentation
+from Actions-bbr-v3, tcp-dashboard, netshape-manager, and tcpfit. No upstream
+program is bundled or executed. See UPSTREAMS.lock for the reviewed revisions.

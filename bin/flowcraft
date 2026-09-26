@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+resolve_lib_dir() {
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [[ -r "$script_dir/../lib/flowcraft/core.sh" ]]; then
+    printf '%s\n' "$script_dir/../lib/flowcraft"
+  else
+    printf '%s\n' "${FLOWCRAFT_LIB_DIR:-/usr/local/lib/flowcraft}"
+  fi
+}
+
+FLOWCRAFT_LIB_DIR="$(resolve_lib_dir)"
+for module in core config discover sysctl tc rollback apply bbr fit mon commands; do
+  # shellcheck disable=SC1090
+  source "$FLOWCRAFT_LIB_DIR/$module.sh"
+done
+
+fc_main "$@"
