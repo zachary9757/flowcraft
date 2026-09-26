@@ -81,7 +81,10 @@ fc_assert_supported_route() {
   count="$(fc_default_route_count)"
   (( count == 1 )) || fc_die "需要唯一默认路由，当前检测到 ${count} 条。"
   routes="$(fc_selected_default_routes)"
-  fc_route_has_multiple_nexthops "$routes" && fc_die '默认路由包含多个 nexthop，拒绝自动选择出口接口。'
+  if fc_route_has_multiple_nexthops "$routes"; then
+    fc_die '默认路由包含多个 nexthop，拒绝自动选择出口接口。'
+  fi
+  return 0
 }
 
 fc_assert_no_conflicts() {

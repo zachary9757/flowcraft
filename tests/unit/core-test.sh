@@ -20,6 +20,12 @@ if fc_route_has_multiple_nexthops 'default proto static nexthop via 192.0.2.1 de
 else
   fail 'single-line ECMP was accepted'
 fi
+if ! (
+  fc_default_route_count() { printf '1\n'; }
+  fc_selected_default_routes() { printf 'default dev eth0\n'; }
+  fc_assert_supported_route
+); then fail 'single default route assertion returned failure'; fi
+pass 'single default route assertion returns success'
 assert_eq "$(fc_buffer_max relay 500 100 4096)" 14597152 'relay buffer uses two BDP plus headroom'
 assert_eq "$(fc_buffer_max landing 1000 1 4096)" 33554432 'landing buffer is independent of RTT'
 
