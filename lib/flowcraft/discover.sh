@@ -96,7 +96,7 @@ fc_assert_no_conflicts() {
 
 fc_assert_qdisc_takeover_safe() {
   local iface="$1" kind owner_iface='' managed_kind=''
-  kind="$(fc_root_qdisc "$iface")"
+  kind="$(fc_root_qdisc "$iface")" || fc_die '无法读取当前 root qdisc，拒绝接管。'
   if [[ -e "$FC_MANAGED_STATE" ]]; then
     fc_managed_state_load || fc_die '托管状态无效，拒绝接管 qdisc。'
     owner_iface="$FC_MANAGED_IFACE"
@@ -108,7 +108,11 @@ fc_assert_qdisc_takeover_safe() {
   fi
   case "${kind:-none}" in
     none|noqueue) ;;
-    *) fc_die "拒绝接管复杂 root qdisc：$kind" ;;
+    pfifo_fast)
+      fc_pfifo_fast_is_standard "$iface" ||
+        fc_die 'pfifo_fast 参数不是可精确恢复的标准指纹，拒绝接管。'
+      ;;
+    *) fc_die "拒绝接管未受支持或未托管的 root qdisc：$kind" ;;
   esac
 }
 

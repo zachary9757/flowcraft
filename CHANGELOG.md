@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 - 2026-09-26
+
+- Added fail-closed takeover of standard `pfifo_fast` root qdiscs.
+- Snapshots now preserve the fixed `bands` and complete `priomap` fingerprint;
+  rollback recreates `pfifo_fast` and verifies the restored fingerprint.
+- Non-standard `pfifo_fast` and all other unsupported unmanaged qdiscs remain
+  rejected before network mutation.
+
 ## 0.2.0 - 2026-09-26
 
 - Added a dependency-free Bash menu for status, role presets, planning,

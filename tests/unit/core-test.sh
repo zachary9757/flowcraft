@@ -175,6 +175,72 @@ write_sysctl_snapshot() {
   checksum="$(fc_sysctl_snapshot_checksum "$FC_SYSCTL_SNAPSHOT")"
   printf '# CKSUM=%s\n' "$checksum" >>"$FC_SYSCTL_SNAPSHOT"
 }
+standard_pfifo='qdisc pfifo_fast 0: root refcnt 2 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1'
+assert_eq "$(tc() { printf '%s\n' "$standard_pfifo"; }; fc_pfifo_fast_fingerprint eth0)" \
+  '3|1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1' 'pfifo_fast fingerprint is parsed completely'
+
+if (tc() { printf '%s extra_option 7\n' "$standard_pfifo"; }; fc_pfifo_fast_is_standard eth0); then
+  fail 'pfifo_fast fingerprint ignored trailing fields'
+fi
+pass 'pfifo_fast fingerprint rejects unknown trailing fields'
+
+if (tc() { printf '%s\n' "$standard_pfifo"; return 7; }; fc_pfifo_fast_is_standard eth0); then
+  fail 'pfifo_fast fingerprint accepted output from a failed tc query'
+fi
+pass 'pfifo_fast fingerprint fails closed when tc returns non-zero'
+
+if (fc_root_qdisc() { return 1; }; fc_assert_qdisc_takeover_safe eth0 >/dev/null 2>&1); then
+  fail 'qdisc takeover accepted an unreadable root state'
+fi
+pass 'qdisc takeover fails closed when root state cannot be read'
+
+if ! (
+  fc_root_qdisc() { printf 'pfifo_fast\n'; }
+  tc() { printf '%s\n' "$standard_pfifo"; }
+  fc_assert_qdisc_takeover_safe eth0
+); then fail 'standard pfifo_fast was rejected'; fi
+pass 'standard pfifo_fast is safe for first takeover'
+
+if (
+  fc_root_qdisc() { printf 'pfifo_fast\n'; }
+  tc() { printf '%s\n' "${standard_pfifo%1}0"; }
+  fc_assert_qdisc_takeover_safe eth0 >/dev/null 2>&1
+); then fail 'non-standard pfifo_fast was accepted'; fi
+pass 'non-standard pfifo_fast fails closed'
+
+rm -f "$FC_QDISC_SNAPSHOT"
+if (fc_root_qdisc() { return 1; }; fc_tc_snapshot eth0 >/dev/null 2>&1); then
+  fail 'qdisc snapshot recorded an unreadable root state as none'
+fi
+[[ ! -e "$FC_QDISC_SNAPSHOT" ]] || fail 'failed root qdisc read left a snapshot'
+pass 'qdisc snapshot fails closed when root state cannot be read'
+
+(
+  fc_root_qdisc() { printf 'pfifo_fast\n'; }
+  tc() { printf '%s\n' "$standard_pfifo"; }
+  fc_tc_snapshot eth0
+)
+grep -Fxq 'KIND=pfifo_fast' "$FC_QDISC_SNAPSHOT" || fail 'pfifo_fast kind was not snapshotted'
+grep -Fxq 'BANDS=3' "$FC_QDISC_SNAPSHOT" || fail 'pfifo_fast bands were not snapshotted'
+grep -Fxq 'PRIOMAP=1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1' "$FC_QDISC_SNAPSHOT" ||
+  fail 'pfifo_fast priomap was not snapshotted'
+pass 'pfifo_fast snapshot preserves the standard fingerprint'
+
+pfifo_restore_marker="$task_tmp/pfifo-restored"
+if ! (
+  tc() {
+    if [[ "$*" == 'qdisc replace dev eth0 root pfifo_fast' ]]; then
+      touch "$pfifo_restore_marker"
+    elif [[ "$*" == '-d qdisc show dev eth0' ]]; then
+      printf '%s\n' "$standard_pfifo"
+    fi
+  }
+  fc_tc_restore
+); then fail 'standard pfifo_fast snapshot was not restored'; fi
+[[ -e "$pfifo_restore_marker" ]] || fail 'pfifo_fast restore did not invoke tc replace'
+pass 'pfifo_fast restore is rebuilt and fingerprint-verified'
+rm -f "$FC_QDISC_SNAPSHOT"
+
 printf 'IFACE=eth0\nKIND=noqueue\n' >"$FC_QDISC_SNAPSHOT"
 if (tc() { return 1; }; fc_tc_restore >/dev/null 2>&1); then
   fail 'qdisc restore accepted an unreadable post-state'

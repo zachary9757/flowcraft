@@ -11,9 +11,10 @@
 
 ## 可接管队列
 
-首版只允许从 `noqueue` 或没有 root qdisc 的状态接管。已有 `fq` 也可能带
-`maxrate` 等自定义参数，`mq` 也可能带自定义叶子；在没有完整可重放快照前，
-FlowCraft 一律拒绝接管这些状态。
+FlowCraft 允许从 `noqueue`、没有 root qdisc，或具有标准固定指纹的
+`pfifo_fast` 状态接管。`pfifo_fast` 快照记录 `bands` 与完整 16 项 `priomap`，
+回滚时用内核支持的裸 qdisc 重建并逐项验证。非标准 `pfifo_fast`、已有 `fq`
+（可能带 `maxrate`）以及 `mq`（可能带自定义叶子）仍会被拒绝。
 
 ## 幂等性
 
@@ -40,3 +41,6 @@ FlowCraft 一律拒绝接管这些状态。
 11. qdisc 应用后验证类型、层级、速率和模式参数。
 12. `tc off` 同样执行 apply、verify、rollback 事务。
 13. 显式 rollback 在停止服务或修改网络前验证全部恢复材料。
+
+`0.2.1` 在不放宽其他 qdisc 的前提下，将标准 `pfifo_fast` 纳入同一套
+snapshot、verify、rollback 门禁。

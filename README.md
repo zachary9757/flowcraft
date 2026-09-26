@@ -3,7 +3,7 @@
 FlowCraft 是面向 Linux VPS 的声明式网络调优工具。它不叠加安装多套网络脚本，
 而是作为 `sysctl`、默认出口 root qdisc 和相关运行态的唯一配置所有者。
 
-当前版本为 `0.2.0`，在可审计、幂等和可回滚的核心之上增加轻量交互与安装管理。
+当前版本为 `0.2.1`，在可审计、幂等和可回滚的核心之上增加轻量交互与安装管理。
 
 ## 设计原则
 
@@ -87,7 +87,7 @@ QDISC_MODE=auto
 `mon` 和 `rollback` 事务，不包含独立的 `sysctl -w` 或裸 `tc` 修改逻辑。
 
 ```text
-FlowCraft 0.2.0
+FlowCraft 0.2.1
   BBR: active    qdisc: fq          Managed: yes
   Interface: eth0        Link: 1000 Mbps
 

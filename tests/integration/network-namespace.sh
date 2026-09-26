@@ -61,11 +61,18 @@ run_flowcraft() {
   fi
 }
 
+ip netns exec "$namespace" tc qdisc replace dev fcguest0 root pfifo_fast
+ip netns exec "$namespace" tc -d qdisc show dev fcguest0 |
+  grep -F 'bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1' >/dev/null
 run_flowcraft tc apply
 run_flowcraft tc apply
-ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -Eq '^qdisc htb .* root '
-ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -Eq '^qdisc fq .* parent 1:10 '
-ip netns exec "$namespace" tc class show dev fcguest0 | grep -Eq 'htb .*rate 900Mbit ceil 900Mbit'
+ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -E '^qdisc htb .* root ' >/dev/null
+ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -E '^qdisc fq .* parent 1:10 ' >/dev/null
+ip netns exec "$namespace" tc class show dev fcguest0 | grep -E 'htb .*rate 900Mbit ceil 900Mbit' >/dev/null
+run_flowcraft rollback
+ip netns exec "$namespace" tc -d qdisc show dev fcguest0 |
+  grep -E '^qdisc pfifo_fast .* root .*bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1$' >/dev/null
+run_flowcraft tc apply
 run_flowcraft tc off
-ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -Eq '^qdisc fq .* root '
-printf 'PASS: idempotent HTB+fq network namespace integration\n'
+ip netns exec "$namespace" tc qdisc show dev fcguest0 | grep -E '^qdisc fq .* root ' >/dev/null
+printf 'PASS: pfifo_fast takeover, rollback, and idempotent HTB+fq integration\n'

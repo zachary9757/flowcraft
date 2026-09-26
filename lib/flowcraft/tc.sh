@@ -6,6 +6,42 @@ FC_TC_TXN_ROLE=''
 FC_TC_TXN_PER_FLOW_MBPS=''
 FC_TC_TXN_TOTAL_MBPS=''
 FC_TC_TXN_QDISC_MODE=''
+FC_PFIFO_FAST_BANDS=3
+FC_PFIFO_FAST_PRIOMAP='1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1'
+
+fc_pfifo_fast_fingerprint() {
+  local iface="$1" output line bands priomap priority index=4
+  local -a fields priorities
+  output="$(tc -d qdisc show dev "$iface" 2>/dev/null)" || return 1
+  line="$(awk '$1 == "qdisc" && $2 == "pfifo_fast" && $0 ~ / root / {print; exit}' <<<"$output")"
+  [[ -n "$line" ]] || return 1
+  read -r -a fields <<<"$line"
+  (( ${#fields[@]} >= 23 )) || return 1
+  [[ "${fields[0]}" == qdisc && "${fields[1]}" == pfifo_fast &&
+    "${fields[2]}" =~ ^[[:xdigit:]]+:$ && "${fields[3]}" == root ]] || return 1
+  if [[ "${fields[$index]}" == refcnt ]]; then
+    fc_is_uint "${fields[$((index + 1))]:-}" || return 1
+    index=$((index + 2))
+  fi
+  [[ "${fields[$index]:-}" == bands ]] || return 1
+  bands="${fields[$((index + 1))]:-}"
+  index=$((index + 2))
+  [[ "${fields[$index]:-}" == priomap ]] || return 1
+  index=$((index + 1))
+  (( ${#fields[@]} == index + 16 )) || return 1
+  priorities=("${fields[@]:$index:16}")
+  priomap="${priorities[*]}"
+  fc_is_uint "$bands" || return 1
+  for priority in "${priorities[@]}"; do
+    fc_is_uint "$priority" || return 1
+    (( priority < bands )) || return 1
+  done
+  printf '%s|%s\n' "$bands" "$priomap"
+}
+
+fc_pfifo_fast_is_standard() {
+  [[ "$(fc_pfifo_fast_fingerprint "$1")" == "$FC_PFIFO_FAST_BANDS|$FC_PFIFO_FAST_PRIOMAP" ]]
+}
 
 fc_tc_desired_kind() {
   case "$QDISC_MODE" in
@@ -41,25 +77,35 @@ fc_tc_plan() {
 }
 
 fc_tc_snapshot() {
-  local iface="$1" kind temp
+  local iface="$1" kind temp fingerprint='' bands='' priomap=''
   if [[ -e "$FC_QDISC_SNAPSHOT" || -L "$FC_QDISC_SNAPSHOT" ]]; then
     fc_tc_snapshot_validate "$iface" || fc_die 'qdisc 快照无效，拒绝修改运行态。'
     return 0
   fi
-  kind="$(fc_root_qdisc "$iface")"
+  kind="$(fc_root_qdisc "$iface")" || return 1
+  if [[ "$kind" == pfifo_fast ]]; then
+    fingerprint="$(fc_pfifo_fast_fingerprint "$iface")" || return 1
+    [[ "$fingerprint" == "$FC_PFIFO_FAST_BANDS|$FC_PFIFO_FAST_PRIOMAP" ]] || return 1
+    bands="${fingerprint%%|*}"
+    priomap="${fingerprint#*|}"
+  fi
   mkdir -p "$FC_STATE_DIR"
   temp="$(mktemp "$FC_STATE_DIR/.qdisc-snapshot.XXXXXX")"
   {
     printf 'IFACE=%s\n' "$iface"
     printf 'KIND=%s\n' "${kind:-none}"
+    if [[ "$kind" == pfifo_fast ]]; then
+      printf 'BANDS=%s\n' "$bands"
+      printf 'PRIOMAP=%s\n' "$priomap"
+    fi
   } >"$temp"
   fc_atomic_replace "$temp" "$FC_QDISC_SNAPSHOT" 0600
   fc_tc_snapshot_validate "$iface"
 }
 
 fc_tc_snapshot_validate() {
-  local expected_iface="${1:-}" iface='' kind='' key value
-  local iface_seen=0 kind_seen=0 invalid=0
+  local expected_iface="${1:-}" iface='' kind='' bands='' priomap='' key value
+  local iface_seen=0 kind_seen=0 bands_seen=0 priomap_seen=0 invalid=0
   [[ -f "$FC_QDISC_SNAPSHOT" && -r "$FC_QDISC_SNAPSHOT" ]] || {
     fc_warn 'qdisc 快照不可读或不是普通文件。'
     return 1
@@ -76,6 +122,16 @@ fc_tc_snapshot_validate() {
         kind="$value"
         kind_seen=1
         ;;
+      BANDS)
+        (( bands_seen == 0 )) || invalid=1
+        bands="$value"
+        bands_seen=1
+        ;;
+      PRIOMAP)
+        (( priomap_seen == 0 )) || invalid=1
+        priomap="$value"
+        priomap_seen=1
+        ;;
       *) invalid=1 ;;
     esac
   done <"$FC_QDISC_SNAPSHOT"
@@ -88,13 +144,27 @@ fc_tc_snapshot_validate() {
     return 1
   }
   case "$kind" in
-    none|noqueue) return 0 ;;
+    none|noqueue)
+      (( bands_seen == 0 && priomap_seen == 0 )) || {
+        fc_warn '简单 qdisc 快照包含多余参数。'
+        return 1
+      }
+      return 0
+      ;;
+    pfifo_fast)
+      if (( bands_seen != 1 || priomap_seen != 1 )) ||
+        [[ "$bands" != "$FC_PFIFO_FAST_BANDS" || "$priomap" != "$FC_PFIFO_FAST_PRIOMAP" ]]; then
+        fc_warn 'pfifo_fast 快照缺少标准且可重放的参数指纹。'
+        return 1
+      fi
+      return 0
+      ;;
     *) fc_warn "快照包含不可恢复的 qdisc：$kind"; return 1 ;;
   esac
 }
 
 fc_tc_restore() {
-  local iface kind actual
+  local iface kind actual bands priomap fingerprint
   if [[ ! -e "$FC_QDISC_SNAPSHOT" ]]; then
     [[ -e "$FC_MANAGED_STATE" ]] && { fc_warn 'qdisc 已托管但快照缺失。'; return 1; }
     fc_warn '没有 qdisc 快照。'
@@ -103,10 +173,28 @@ fc_tc_restore() {
   fc_tc_snapshot_validate || return 1
   iface="$(awk -F= '$1 == "IFACE" {print $2}' "$FC_QDISC_SNAPSHOT")"
   kind="$(awk -F= '$1 == "KIND" {print $2}' "$FC_QDISC_SNAPSHOT")"
-  tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
-  actual="$(fc_root_qdisc "$iface")" || { fc_warn '无法读取 qdisc 恢复结果。'; return 1; }
-  case "${actual:-none}" in none|noqueue) return 0 ;; esac
-  fc_warn "qdisc 未恢复：期望 ${kind}，实际 ${actual}"
+  case "$kind" in
+    none|noqueue)
+      tc qdisc del dev "$iface" root >/dev/null 2>&1 || true
+      actual="$(fc_root_qdisc "$iface")" || { fc_warn '无法读取 qdisc 恢复结果。'; return 1; }
+      case "${actual:-none}" in none|noqueue) return 0 ;; esac
+      ;;
+    pfifo_fast)
+      bands="$(awk -F= '$1 == "BANDS" {print $2}' "$FC_QDISC_SNAPSHOT")"
+      priomap="$(awk -F= '$1 == "PRIOMAP" {sub(/^[^=]*=/, ""); print}' "$FC_QDISC_SNAPSHOT")"
+      tc qdisc replace dev "$iface" root pfifo_fast || {
+        fc_warn '无法重建 pfifo_fast qdisc。'
+        return 1
+      }
+      fingerprint="$(fc_pfifo_fast_fingerprint "$iface")" || {
+        fc_warn '无法读取 pfifo_fast 恢复结果。'
+        return 1
+      }
+      [[ "$fingerprint" == "$bands|$priomap" ]] && return 0
+      actual="${fingerprint:-unknown}"
+      ;;
+  esac
+  fc_warn "qdisc 未恢复：期望 ${kind}，实际 ${actual:-unknown}"
   return 1
 }
 
