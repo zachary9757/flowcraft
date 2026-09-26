@@ -66,6 +66,7 @@ run_flowcraft() {
 normalize_qdisc_output() {
   sed -E \
     -e 's/^(qdisc [^ ]+) [^ ]+ /\1 HANDLE /' \
+    -e 's/ parent [[:xdigit:]]*:/ parent HANDLE:/' \
     -e 's/ refcnt [0-9]+ / /' \
     -e 's/[[:space:]]+$//'
 }
