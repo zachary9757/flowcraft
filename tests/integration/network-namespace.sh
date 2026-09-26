@@ -43,13 +43,22 @@ ip netns exec "$namespace" ip link set fcguest0 up
 ip netns exec "$namespace" ip route add default dev fcguest0
 
 run_flowcraft() {
-  ip netns exec "$namespace" env \
+  local status trace="$task_tmp/flowcraft-trace"
+  if ip netns exec "$namespace" env \
     FLOWCRAFT_CONFIG_FILE="$task_tmp/config.conf" \
     FLOWCRAFT_STATE_DIR="$task_tmp/state" \
     FLOWCRAFT_LOCK_FILE="$task_tmp/lock" \
     FLOWCRAFT_ROOT_PREFIX="$task_tmp/root" \
     FLOWCRAFT_SERVICE_FILE="$task_tmp/flowcraft.service" \
-    "$repo_root/bin/flowcraft" "$@"
+    bash -x "$repo_root/bin/flowcraft" "$@" 2>"$trace"; then
+    rm -f "$trace"
+    return 0
+  else
+    status=$?
+    printf '%s\n' '--- flowcraft trace ---' >&2
+    cat "$trace" >&2
+    return "$status"
+  fi
 }
 
 run_flowcraft tc apply
