@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-for module in core config discover sysctl tc rollback; do
+for module in core config discover sysctl tc rollback apply commands; do
   # shellcheck disable=SC1090
   source "$repo_root/lib/flowcraft/$module.sh"
 done
@@ -102,6 +102,48 @@ FC_CONFIG_FILE="$FC_ETC_DIR/config.conf"
 [[ -e "$config_lock_marker" ]] || fail 'default config write bypassed the global lock'
 pass 'default config persistence takes the global lock'
 FC_CONFIG_FILE="$task_tmp/config.conf"
+
+(
+  fc_take_lock() { :; }
+  fc_config_defaults
+  ROLE=landing
+  TOTAL_MBPS=900
+  fc_config_write
+)
+grep -Fxq 'ROLE=landing' "$FC_CONFIG_FILE" || fail 'atomic config update did not persist role'
+grep -Fxq 'TOTAL_MBPS=900' "$FC_CONFIG_FILE" || fail 'atomic config update did not persist rate'
+[[ "$(stat -c '%a' "$FC_CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$FC_CONFIG_FILE")" == 600 ]] ||
+  fail 'atomic config update used unsafe permissions'
+pass 'validated config updates atomically with mode 0600'
+
+if (
+  fc_take_lock() { :; }
+  fc_config_defaults
+  ROLE=invalid
+  fc_config_write >/dev/null 2>&1
+); then fail 'invalid in-memory config was persisted'; fi
+grep -Fxq 'ROLE=landing' "$FC_CONFIG_FILE" || fail 'invalid config write changed the previous file'
+pass 'invalid in-memory config is rejected before persistence'
+
+apply_marker="$task_tmp/apply-after-snapshot-failure"
+if (
+  fc_need_root() { :; }
+  fc_take_lock() { :; }
+  fc_config_load() { fc_config_defaults; }
+  uname() { printf 'Linux\n'; }
+  fc_has() { :; }
+  fc_assert_supported_route() { :; }
+  fc_assert_no_conflicts() { :; }
+  fc_resolve_iface() { printf 'eth0\n'; }
+  fc_assert_qdisc_takeover_safe() { :; }
+  fc_tc_transaction_begin() { :; }
+  fc_sysctl_snapshot() { return 1; }
+  fc_tc_snapshot() { touch "$apply_marker"; }
+  fc_sysctl_apply() { touch "$apply_marker"; }
+  fc_main apply >/dev/null 2>&1
+); then fail 'conditional apply ignored a snapshot failure'; fi
+[[ ! -e "$apply_marker" ]] || fail 'apply mutated state after a snapshot failure'
+pass 'conditional apply stops before mutation when snapshot creation fails'
 
 FLOWCRAFT_ROOT_PREFIX="$task_tmp/root"
 mkdir -p "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d"

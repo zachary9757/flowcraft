@@ -2,8 +2,9 @@
 
 fc_usage() {
   cat <<'EOF'
-Usage: flowcraft COMMAND
+Usage: flowcraft [COMMAND]
 
+  (no command)                             open the interactive menu
   inspect [--json]                         read-only system inspection
   plan                                     render changes without applying
   apply                                    apply and verify managed state
@@ -18,8 +19,12 @@ EOF
 }
 
 fc_main() {
-  local command="${1:-help}"
-  shift || true
+  if (( $# == 0 )); then
+    fc_menu
+    return
+  fi
+  local command="$1"
+  shift
   case "$command" in
     help|-h|--help) fc_usage ;;
     version|-V|--version) printf 'flowcraft %s\n' "$FLOWCRAFT_VERSION" ;;

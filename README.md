@@ -3,7 +3,7 @@
 FlowCraft 是面向 Linux VPS 的声明式网络调优工具。它不叠加安装多套网络脚本，
 而是作为 `sysctl`、默认出口 root qdisc 和相关运行态的唯一配置所有者。
 
-当前为从零重写的 `0.1.0` 基础版本，优先实现可审计、幂等和可回滚的最小闭环。
+当前版本为 `0.2.0`，在可审计、幂等和可回滚的核心之上增加轻量交互与安装管理。
 
 ## 设计原则
 
@@ -29,7 +29,8 @@ flowcraft rollback
 flowcraft version
 ```
 
-`ftcp` 作为兼容入口，行为与 `flowcraft` 相同。
+`ftcp` 作为兼容入口，行为与 `flowcraft` 相同。不带参数运行 `flowcraft` 或 `ftcp`
+会进入纯 Bash 交互面板；带参数时仍使用上述可审计的 CLI 命令。
 
 ## 快速开始
 
@@ -37,20 +38,20 @@ flowcraft version
 旧版用户必须在替换程序前先使用原版本执行 `sudo ftcp rollback`，并备份后移走
 `/etc/flowcraft` 与 `/var/lib/flowcraft`；新版检测到旧快照时会 fail-closed，拒绝修改网络。
 
-全新 Linux VPS 可使用一键安装。脚本固定下载 `v0.1.0` Tag 对应的提交，检测到
-无法确认版本的旧配置或状态时会拒绝覆盖；安装后只运行 `inspect` 和 `plan`，
-**不会执行 `apply` 或修改网络运行态**：
+全新 Linux VPS 可在 root shell 中使用一键安装。`install.sh` 检测到自己不是在完整
+仓库中运行时，会通过 HTTPS 下载 `main` 分支源码，检查 Bash 4.4、iproute2、procps、
+util-linux 等依赖，再安装到 `/usr/local`。安装本身**不会执行 `apply` 或修改网络运行态**：
 
 ```bash
-curl -fsSL --proto '=https' https://raw.githubusercontent.com/zachary9757/flowcraft/main/quick-install.sh | sudo bash
+curl -fsSL --proto '=https' https://raw.githubusercontent.com/zachary9757/flowcraft/main/install.sh | bash
 ```
 
 如需先审阅脚本，可下载后再运行：
 
 ```bash
-curl -fLo quick-install.sh https://raw.githubusercontent.com/zachary9757/flowcraft/main/quick-install.sh
-less quick-install.sh
-sudo bash quick-install.sh
+curl -fLo install.sh https://raw.githubusercontent.com/zachary9757/flowcraft/main/install.sh
+less install.sh
+sudo bash install.sh
 ```
 
 已克隆仓库时仍可直接安装：
@@ -59,9 +60,10 @@ sudo bash quick-install.sh
 sudo ./install.sh
 sudo flowcraft inspect
 sudo flowcraft plan
-sudo flowcraft apply
+sudo flowcraft
 ```
 
+安装结束会询问是否立即进入面板。自动化环境可设置 `FLOWCRAFT_NO_PROMPT=1` 跳过询问。
 两种安装方式本身都不会修改网络。默认配置位于 `/etc/flowcraft/config.conf`：
 
 ```text
@@ -78,6 +80,41 @@ QDISC_MODE=auto
 - `general`：BBR 可用时使用 BBR，否则 Cubic；root fq，不限速。
 - `relay`：缓冲按单流 BDP 计算；可使用 HTB 总出口加 fq 单流上限。
 - `landing`：固定保守缓冲；有总出口值时使用 HTB aggregate shaping。
+
+## 交互面板
+
+面板是轻量展示与驱动层：它只原子更新白名单配置，并调用现有的 `plan`、`apply`、
+`mon` 和 `rollback` 事务，不包含独立的 `sysctl -w` 或裸 `tc` 修改逻辑。
+
+```text
+FlowCraft 0.2.0
+  BBR: active    qdisc: fq          Managed: yes
+  Interface: eth0        Link: 1000 Mbps
+
+[1] 通用调优（General / BBR + FQ + 动态缓冲）
+[2] 中继优化（Relay / 吞吐缓冲 + 可选总限速）
+[3] 落地机优化（Landing / 保守缓冲 + 可选总限速）
+[4] 查看执行计划（Plan / Dry-Run）
+[5] 实时连接与丢包监控（Monitor）
+[6] 回滚到首次接管前状态（Rollback）
+[0] 退出
+
+请选择 [0-6]：
+```
+
+选取调优预设后，面板先展示完整计划并再次确认。`apply` 失败时底层事务负责恢复
+网络状态，面板同时恢复原配置文件。
+
+## 卸载
+
+在仓库目录或下载后的安装脚本上运行：
+
+```bash
+sudo ./install.sh --uninstall
+```
+
+如果检测到托管配置或恢复快照，卸载器会要求先调用 `flowcraft rollback`；只有回滚
+成功且恢复材料已清理后，才删除 systemd 单元、二进制、软链接、配置与状态目录。
 
 ## 支持边界
 

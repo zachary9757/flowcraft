@@ -48,8 +48,8 @@ fc_apply() {
   iface="$(fc_resolve_iface)"
   fc_assert_qdisc_takeover_safe "$iface"
   fc_tc_transaction_begin "$iface" || fc_die '无法建立 qdisc 事务基线。'
-  fc_sysctl_snapshot
-  fc_tc_snapshot "$iface"
+  fc_sysctl_snapshot || fc_die '无法建立 sysctl 接管前快照；未修改网络状态。'
+  fc_tc_snapshot "$iface" || fc_die '无法建立 qdisc 接管前快照；未修改网络状态。'
   fc_sysctl_transaction_begin || fc_die '无法建立 sysctl 事务基线。'
   if ! fc_sysctl_apply; then
     fc_apply_abort 0 || fc_die 'sysctl 应用失败且回滚不完整；快照已保留。'

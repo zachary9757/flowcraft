@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2034
 
-FLOWCRAFT_VERSION=0.1.0
+FLOWCRAFT_VERSION=0.2.0
 FC_PROGRAM=flowcraft
 FC_ETC_DIR="${FLOWCRAFT_ETC_DIR:-/etc/flowcraft}"
 FC_STATE_DIR="${FLOWCRAFT_STATE_DIR:-/var/lib/flowcraft}"

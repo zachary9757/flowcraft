@@ -12,7 +12,7 @@ resolve_lib_dir() {
 }
 
 FLOWCRAFT_LIB_DIR="$(resolve_lib_dir)"
-for module in core config discover sysctl tc rollback apply bbr fit mon commands; do
+for module in core config discover sysctl tc rollback apply bbr fit mon menu commands; do
   # shellcheck disable=SC1090
   source "$FLOWCRAFT_LIB_DIR/$module.sh"
 done

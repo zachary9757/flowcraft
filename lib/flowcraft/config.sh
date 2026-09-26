@@ -52,12 +52,25 @@ fc_config_validate_semantics() {
   fi
 }
 
-fc_config_save_defaults() {
+fc_config_validate_current() {
+  if ! fc_config_valid ROLE "$ROLE" ||
+    ! fc_config_valid IFACE "$IFACE" ||
+    ! fc_config_valid RTT_MS "$RTT_MS" ||
+    ! fc_config_valid PER_FLOW_MBPS "$PER_FLOW_MBPS" ||
+    ! fc_config_valid TOTAL_MBPS "$TOTAL_MBPS" ||
+    ! fc_config_valid QDISC_MODE "$QDISC_MODE"; then
+    fc_warn '拒绝写入无效配置。'
+    return 1
+  fi
+  fc_config_validate_semantics
+}
+
+fc_config_write() {
+  fc_config_validate_current || return 1
   fc_take_lock
-  [[ -e "$FC_CONFIG_FILE" ]] && return 0
   local temp
-  mkdir -p "$FC_ETC_DIR"
-  temp="$(mktemp "$FC_ETC_DIR/.config.XXXXXX")"
+  mkdir -p "$FC_ETC_DIR" || return 1
+  temp="$(mktemp "$FC_ETC_DIR/.config.XXXXXX")" || return 1
   {
     printf '# FlowCraft declarative configuration\n'
     printf 'ROLE=%s\n' "$ROLE"
@@ -66,6 +79,15 @@ fc_config_save_defaults() {
     printf 'PER_FLOW_MBPS=%s\n' "$PER_FLOW_MBPS"
     printf 'TOTAL_MBPS=%s\n' "$TOTAL_MBPS"
     printf 'QDISC_MODE=%s\n' "$QDISC_MODE"
-  } >"$temp"
-  fc_atomic_replace "$temp" "$FC_CONFIG_FILE" 0600
+  } >"$temp" || { rm -f "$temp"; return 1; }
+  fc_atomic_replace "$temp" "$FC_CONFIG_FILE" 0600 || {
+    rm -f "$temp"
+    return 1
+  }
+}
+
+fc_config_save_defaults() {
+  fc_take_lock
+  [[ -e "$FC_CONFIG_FILE" || -L "$FC_CONFIG_FILE" ]] && return 0
+  fc_config_write
 }
