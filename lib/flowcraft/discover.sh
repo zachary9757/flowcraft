@@ -74,6 +74,7 @@ fc_find_conflicts() {
       grep -Eq "^[[:space:]]*(${pattern})[[:space:]]*=" "$path" 2>/dev/null && printf '%s\n' "$path"
     done < <(find -L "$root$directory" -maxdepth 1 -type f -name '*.conf' -print 2>/dev/null | sort)
   done
+  return 0
 }
 
 fc_assert_supported_route() {

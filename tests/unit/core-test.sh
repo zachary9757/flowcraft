@@ -112,6 +112,11 @@ mkdir -p "$FLOWCRAFT_ROOT_PREFIX/run/sysctl.d"
 printf 'net.core.default_qdisc = fq\n' >"$FLOWCRAFT_ROOT_PREFIX/run/sysctl.d/70-runtime.conf"
 [[ "$(fc_find_conflicts)" == *70-runtime.conf* ]] || fail 'runtime sysctl conflict not detected'
 pass 'runtime sysctl owner is detected'
+rm -f "$FLOWCRAFT_ROOT_PREFIX/etc/sysctl.d/80-other.conf" \
+  "$FLOWCRAFT_ROOT_PREFIX/run/sysctl.d/70-runtime.conf"
+conflicts="$(fc_find_conflicts)" || fail 'empty conflict scan returned failure'
+[[ -z "$conflicts" ]] || fail 'empty conflict scan returned unexpected paths'
+pass 'empty sysctl conflict scan succeeds'
 
 FC_STATE_DIR="$task_tmp/state"
 FC_QDISC_SNAPSHOT="$FC_STATE_DIR/qdisc.snapshot"
